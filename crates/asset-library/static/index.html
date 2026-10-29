@@ -58,6 +58,7 @@
       <div class="resultbar">
         <span id="count" class="muted"></span>
         <span id="sel-count"></span>
+        <button id="export-results" class="ghost small hidden" title="Export every result of this search">Export results…</button>
       </div>
       <div id="grid" class="grid"></div>
       <div id="empty" class="empty hidden"></div>
@@ -86,6 +87,8 @@
   <dialog id="export-dialog">
     <form method="dialog">
       <h2>Export <span class="n"></span> items</h2>
+      <label class="check" id="export-all-row"><input type="checkbox" name="all">
+        All <span class="total"></span> results of the current search</label>
       <label class="check"><input type="checkbox" name="flatten" checked>
         Flatten (don't recreate subfolders)</label>
       <label>Copy to folder

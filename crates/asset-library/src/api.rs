@@ -958,10 +958,47 @@ async fn reveal(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Path(i
 
 #[derive(Deserialize)]
 struct ExportIn {
+    #[serde(default)]
     ids: Vec<i64>,
+    /// Export every result of this search instead of `ids`.
+    q: Option<String>,
     dest: Option<String>,
     #[serde(default = "yes")]
     flatten: bool,
+}
+
+/// Zips downloaded through the browser are built in memory; bigger exports go to a folder,
+/// or to a file through the desktop app's save dialog.
+const MAX_ZIP_DOWNLOAD: i64 = 1 << 30;
+
+/// The ids an export covers: `ids`, or every result of `q` (in name order).
+fn export_ids(s: &AppState, body: &ExportIn) -> ApiResult<Vec<i64>> {
+    let Some(q) = &body.q else { return Ok(body.ids.clone()) };
+    s.tx(|c| {
+        let parsed = search::parse_with(q, &search::FieldKeys::new(&properties::list_fields(c)?));
+        if parsed.ranked() {
+            return Err(err(StatusCode::BAD_REQUEST, "Exporting every result doesn't work with image search; select them instead"));
+        }
+        let (wh, params) = search::build_sql(&parsed, false);
+        let mut stmt = c.prepare(&format!("SELECT a.id FROM assets a WHERE {wh} ORDER BY {}", search::order_by("name")))?;
+        let ids = stmt.query_map(params_from_iter(&params), |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(ids)
+    })
+}
+
+/// Total stored size of the assets, in bytes.
+fn total_size(s: &AppState, ids: &[i64]) -> ApiResult<i64> {
+    s.tx(|c| {
+        let mut total = 0;
+        for chunk in ids.chunks(900) {
+            total += c.query_row(
+                &format!("SELECT coalesce(sum(size), 0) FROM assets WHERE id IN ({})", marks(chunk.len())),
+                params_from_iter(chunk),
+                |r| r.get::<_, i64>(0),
+            )?;
+        }
+        Ok(total)
+    })
 }
 
 fn export_items(s: &AppState, ids: &[i64]) -> ApiResult<Vec<export::Item>> {
@@ -986,17 +1023,21 @@ async fn export_folder(
     Json(body): Json<ExportIn>,
 ) -> ApiResult {
     local_only(addr)?;
-    let Some(dest) = body.dest.filter(|d| !d.is_empty()) else {
+    let Some(dest) = body.dest.clone().filter(|d| !d.is_empty()) else {
         return Err(err(StatusCode::BAD_REQUEST, "Destination folder required"));
     };
-    let items = export_items(&s, &body.ids)?;
+    let items = export_items(&s, &export_ids(&s, &body)?)?;
     let written = tokio::task::block_in_place(|| export::copy_to_folder(&items, &expand_user(&dest), body.flatten))
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "count": written.len(), "dest": dest })))
 }
 
 async fn export_zip(State(s): St, Json(body): Json<ExportIn>) -> ApiResult<Response> {
-    let items = export_items(&s, &body.ids)?;
+    let ids = export_ids(&s, &body)?;
+    if total_size(&s, &ids)? > MAX_ZIP_DOWNLOAD {
+        return Err(err(StatusCode::BAD_REQUEST, "Too big to download as one zip (over 1 GB); copy to a folder instead"));
+    }
+    let items = export_items(&s, &ids)?;
     let data = tokio::task::block_in_place(|| export::build_zip(&items, body.flatten))
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok((
@@ -1105,12 +1146,13 @@ async fn export_zip_save(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr
     let Some(desktop) = s.desktop.clone() else {
         return Err(err(StatusCode::BAD_REQUEST, "Saving needs the desktop app"));
     };
-    let items = export_items(&s, &body.ids)?;
+    let items = export_items(&s, &export_ids(&s, &body)?)?;
     let Some(dest) = tokio::task::spawn_blocking(move || desktop.pick_save_file("assets.zip")).await.ok().flatten() else {
         return Ok(Json(json!({ "path": "" })));
     };
     tokio::task::block_in_place(|| -> anyhow::Result<()> {
-        std::fs::write(&dest, export::build_zip(&items, body.flatten)?)?;
+        let file = std::io::BufWriter::new(std::fs::File::create(&dest)?);
+        export::write_zip(file, &items, body.flatten)?;
         Ok(())
     })
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

@@ -171,3 +171,13 @@ def test_corrupt_pack_is_reported(make_server, tmp_path):
     c.post("/api/sources", json={"path": str(root)})
     st = wait_idle(c)
     assert any("Broken.dungeondraft_pack" in e for e in st["errors"])
+
+
+def test_export_every_search_result(lib):
+    server, root = lib
+    c = server.client
+    out = root.parent / "all-props"
+    r = c.post("/api/export/folder", json={"q": "type:prop", "dest": str(out), "flatten": False})
+    assert r.json()["count"] == 2
+    assert sorted(p.name for p in out.rglob("*.png")) == ["Barrel_A_1x1.png", "Chair_Wood_A_1x1.png"]
+    assert c.post("/api/export/zip", json={"q": '~"chair"'}).status_code == 400  # ranked search

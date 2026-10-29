@@ -74,7 +74,12 @@ pub fn copy_to_folder(items: &[Item], dest_dir: &Path, flatten: bool) -> std::io
 
 /// An uncompressed zip (images are already compressed) with duplicate names numbered.
 pub fn build_zip(items: &[Item], flatten: bool) -> anyhow::Result<Vec<u8>> {
-    let mut zf = ZipWriter::new(Cursor::new(Vec::new()));
+    Ok(write_zip(Cursor::new(Vec::new()), items, flatten)?.into_inner())
+}
+
+/// Write the zip to `out` (a file, for exports too big to hold in memory).
+pub fn write_zip<W: Write + std::io::Seek>(out: W, items: &[Item], flatten: bool) -> anyhow::Result<W> {
+    let mut zf = ZipWriter::new(out);
     let mut used = HashSet::new();
     for item in items {
         let base = target_parts(item, flatten).join("/");
@@ -85,14 +90,16 @@ pub fn build_zip(items: &[Item], flatten: bool) -> anyhow::Result<Vec<u8>> {
         }
         used.insert(name.to_lowercase());
         let data = item.location.read()?;
-        let mut opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        let mut opts = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .large_file(data.len() as u64 >= u32::MAX as u64);
         if let Some(t) = zip_time(item.location.disk_path()) {
             opts = opts.last_modified_time(t);
         }
         zf.start_file(name, opts)?;
         zf.write_all(&data)?;
     }
-    Ok(zf.finish()?.into_inner())
+    Ok(zf.finish()?)
 }
 
 /// The file's modification time (UTC) as a zip timestamp.

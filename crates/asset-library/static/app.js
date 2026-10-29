@@ -250,6 +250,7 @@ function renderCounts() {
     : `${state.total.toLocaleString()} item${state.total === 1 ? "" : "s"}`;
   const n = state.selected.size;
   $("#sel-count").textContent = n ? `${n} selected` : "";
+  $("#export-results").classList.toggle("hidden", ranked || state.total === 0);
   const empty = $("#empty");
   empty.classList.toggle("hidden", state.total > 0 || state.loading);
   empty.innerHTML = state.sources.length
@@ -754,17 +755,30 @@ async function onSourceDialogClose() {
   } catch (e) { toast(e.message, true); }
 }
 
-function openExport() {
+/** With `all`, start with "every result of the search" ticked (nothing needs selecting). */
+function openExport(all = false) {
   const dlg = $("#export-dialog");
-  $(".n", dlg).textContent = state.selected.size;
-  $("form", dlg).dest.value = store.get("exportDest", "");
+  const f = $("form", dlg);
+  const ranked = /(^|\s)~|similar:\d/.test(state.q);
+  const offerAll = !ranked && state.total > state.selected.size;
+  $("#export-all-row").classList.toggle("hidden", !offerAll);
+  $(".total", dlg).textContent = state.total.toLocaleString();
+  f.all.checked = offerAll && (all === true || state.selected.size === 0);
+  const count = () => { $(".n", dlg).textContent = (f.all.checked ? state.total : state.selected.size).toLocaleString(); };
+  f.all.onchange = count;
+  count();
+  f.dest.value = store.get("exportDest", "");
   dlg.showModal();
 }
 
 async function onExportClose() {
   const dlg = $("#export-dialog");
   const f = $("form", dlg);
-  const body = { ids: [...state.selected], flatten: f.flatten.checked };
+  const body = f.all.checked
+    ? { q: state.q, flatten: f.flatten.checked }
+    : { ids: [...state.selected], flatten: f.flatten.checked };
+  if (["zip", "folder"].includes(dlg.returnValue) && !f.all.checked && !body.ids.length)
+    return toast("Select something to export, or tick “All results”", true);
   try {
     if (dlg.returnValue === "zip" && state.meta.desktop) {
       const { path } = await api("/api/export/zip-save", { method: "POST", body });
@@ -991,6 +1005,7 @@ function bindEvents() {
   $("#main").addEventListener("click", (e) => { if (e.target.id === "empty-add") openSourceDialog(); });
   $("#source-dialog").addEventListener("close", onSourceDialogClose);
   $("#export-dialog").addEventListener("close", onExportClose);
+  $("#export-results").addEventListener("click", () => openExport(true));
   document.querySelectorAll("dialog .browse").forEach((b) =>
     b.addEventListener("click", () => pickFolderInto(b.previousElementSibling)));
 
