@@ -6,9 +6,9 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
@@ -17,12 +17,14 @@ use serde_json::{Map, Value, json};
 
 use crate::config::{ASSET_TYPES, COLOR_HEX};
 use crate::db::{Database, get_or_create_tags, marks, reindex_fts};
+use crate::jobs::Jobs;
 use crate::scanner::{Scanner, join_rel};
 use crate::search;
 
 pub struct AppState {
     pub db: Arc<Database>,
     pub scanner: Arc<Scanner>,
+    pub jobs: Arc<Jobs>,
 }
 
 type St = State<Arc<AppState>>;
@@ -32,10 +34,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/meta", get(meta))
         .route("/api/sources", get(list_sources).post(add_source))
         .route("/api/sources/{sid}", patch(update_source).delete(delete_source))
-        .route("/api/scan", axum::routing::post(start_scan))
+        .route("/api/scan", post(start_scan))
         .route("/api/scan/status", get(scan_status))
         .route("/api/assets", get(list_assets))
         .route("/api/assets/{id}", get(get_asset).patch(update_asset))
+        .route("/api/assets/{id}/thumb", get(thumb))
+        .route("/api/assets/{id}/file", get(original))
+        .route("/api/assets/{id}/reveal", post(reveal))
         .route("/api/tags", get(list_tags))
         .with_state(state)
 }
@@ -47,8 +52,8 @@ impl AppState {
     }
 
     fn start_scan(&self, ids: Vec<i64>) -> bool {
-        // TODO(M2): queue the thumbnail/analysis pipeline after the scan, as jobs.start does.
-        self.scanner.scan_in_background(ids, || {})
+        let jobs = Arc::clone(&self.jobs);
+        self.scanner.scan_in_background(ids, move || jobs.start())
     }
 }
 
@@ -315,8 +320,8 @@ async fn start_scan(State(s): St, Json(body): Json<ScanIn>) -> ApiResult {
 
 async fn scan_status(State(s): St) -> Json<Value> {
     let mut v = serde_json::to_value(s.scanner.status().clone()).unwrap_or_default();
-    // TODO(M2, M4): real thumbnail-warmer and analysis progress.
-    v["thumbs"] = json!({ "running": false, "total": 0, "done": 0, "failed": 0 });
+    v["thumbs"] = serde_json::to_value(s.jobs.thumbs.status().clone()).unwrap_or_default();
+    // TODO(M4): real analysis progress.
     v["analysis"] =
         json!({ "running": false, "total": 0, "done": 0, "ai_available": false, "error": "" });
     Json(v)
@@ -499,4 +504,104 @@ async fn list_tags(State(s): St) -> ApiResult {
         Ok(rows)
     })?;
     Ok(Json(rows.into()))
+}
+
+// ---------------------------------------------------------------- files
+
+/// Content type by extension, like Python's `mimetypes` for the formats we index.
+fn mime_type(path: &FsPath) -> &'static str {
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_lowercase);
+    match ext.as_deref() {
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("bmp") => "image/bmp",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Starlette's `Content-Disposition` for a download: plain if the name needs no quoting,
+/// RFC 5987 otherwise.
+fn content_disposition(name: &str) -> String {
+    let quoted: String = name
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b'~' | b'/' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    if quoted == name {
+        format!("attachment; filename=\"{name}\"")
+    } else {
+        format!("attachment; filename*=utf-8''{quoted}")
+    }
+}
+
+async fn thumb(State(s): St, Path(id): Path<i64>) -> ApiResult<Response> {
+    let row = s.tx(|c| asset_row(c, id))?;
+    let hash = row["file_hash"].as_str().unwrap_or_default().to_string();
+    let source = full_path(&row);
+    let data = tokio::task::block_in_place(|| {
+        let path = s.jobs.thumbs.get(&source, &hash)?;
+        Ok::<_, anyhow::Error>(std::fs::read(path)?)
+    })
+    .map_err(|_| err(StatusCode::NOT_FOUND, "Cannot read image"))?;
+    Ok((
+        [(header::CONTENT_TYPE, "image/webp"), (header::CACHE_CONTROL, "max-age=31536000, immutable")],
+        data,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct FileParams {
+    #[serde(default)]
+    download: bool,
+}
+
+async fn original(State(s): St, Path(id): Path<i64>, Query(q): Query<FileParams>) -> ApiResult<Response> {
+    let path = full_path(&s.tx(|c| asset_row(c, id))?);
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|_| err(StatusCode::NOT_FOUND, "File missing on disk"))?;
+    let mut resp = ([(header::CONTENT_TYPE, mime_type(&path))], data).into_response();
+    if q.download {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if let Ok(v) = content_disposition(&name).parse() {
+            resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+        }
+    }
+    Ok(resp)
+}
+
+/// Show the file in the system file manager.
+pub fn reveal_in_file_manager(path: &FsPath) -> std::io::Result<()> {
+    use std::process::Command;
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("explorer");
+        c.arg("/select,").arg(path);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut cmd = {
+        let mut c = Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    cmd.spawn().map(drop)
+}
+
+async fn reveal(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Path(id): Path<i64>) -> ApiResult {
+    local_only(addr)?;
+    let path = full_path(&s.tx(|c| asset_row(c, id))?);
+    reveal_in_file_manager(&path).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    ok()
 }

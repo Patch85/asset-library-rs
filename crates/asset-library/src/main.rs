@@ -6,7 +6,9 @@ use std::sync::Arc;
 use asset_library::api::{self, AppState};
 use asset_library::config::Config;
 use asset_library::db::Database;
+use asset_library::jobs::Jobs;
 use asset_library::scanner::Scanner;
+use asset_library::thumbs::Thumbs;
 use clap::Parser;
 
 #[derive(Parser)]
@@ -26,8 +28,10 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env();
     let db = Arc::new(Database::open(&cfg.db_path())?);
     let scanner = Arc::new(Scanner::new(Arc::clone(&db)));
-    // TODO(M2): start the thumbnail/analysis pipeline, to fill in anything not done yet.
-    let app = api::router(Arc::new(AppState { db, scanner }));
+    let thumbs = Arc::new(Thumbs::new(cfg.data_dir.join("thumbs")));
+    let jobs = Arc::new(Jobs::new(Arc::clone(&db), thumbs));
+    jobs.start(); // fill in any thumbnails/analysis not done yet
+    let app = api::router(Arc::new(AppState { db, scanner, jobs }));
 
     let host = if args.lan { Ipv4Addr::UNSPECIFIED } else { Ipv4Addr::LOCALHOST };
     let listener = tokio::net::TcpListener::bind((host, args.port)).await?;
