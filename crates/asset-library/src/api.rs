@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::config::{ASSET_TYPES, COLOR_HEX};
-use crate::db::{Database, get_or_create_tags, marks, reindex_fts};
+use crate::db::{Database, get_or_create_tags, marks, normalize_tag, reindex_fts};
 use crate::export;
 use crate::jobs::Jobs;
 use crate::scanner::{Scanner, join_rel};
@@ -38,6 +38,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/scan", post(start_scan))
         .route("/api/scan/status", get(scan_status))
         .route("/api/assets", get(list_assets))
+        .route("/api/assets/bulk", post(bulk_update))
         .route("/api/assets/{id}", get(get_asset).patch(update_asset))
         .route("/api/assets/{id}/thumb", get(thumb))
         .route("/api/assets/{id}/file", get(original))
@@ -45,6 +46,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/export/folder", post(export_folder))
         .route("/api/export/zip", post(export_zip))
         .route("/api/tags", get(list_tags))
+        .route("/api/tags/{name}", patch(rename_tag).delete(delete_tag))
         .with_state(state)
 }
 
@@ -491,6 +493,60 @@ async fn update_asset(State(s): St, Path(id): Path<i64>, Json(body): Json<AssetP
     })
 }
 
+#[derive(Deserialize)]
+struct BulkIn {
+    ids: Vec<i64>,
+    #[serde(default)]
+    add_tags: Vec<String>,
+    #[serde(default)]
+    remove_tags: Vec<String>,
+    asset_type: Option<String>,
+    favorite: Option<bool>,
+}
+
+async fn bulk_update(State(s): St, Json(body): Json<BulkIn>) -> ApiResult {
+    let ids = &body.ids;
+    if ids.is_empty() {
+        return ok();
+    }
+    let m = marks(ids.len());
+    let with_ids = |first: SqlValue| std::iter::once(first).chain(ids.iter().map(|&i| i.into()));
+    s.tx(|c| {
+        for tid in get_or_create_tags(c, &body.add_tags)? {
+            let mut stmt = c.prepare("INSERT OR IGNORE INTO asset_tags VALUES (?, ?)")?;
+            for id in ids {
+                stmt.execute(params![id, tid])?;
+            }
+        }
+        for name in &body.remove_tags {
+            let params = ids.iter().map(|&i| SqlValue::from(i)).chain([normalize_tag(name).into()]);
+            c.execute(
+                &format!(
+                    "DELETE FROM asset_tags WHERE asset_id IN ({m})
+                     AND tag_id = (SELECT id FROM tags WHERE name = ?)"
+                ),
+                params_from_iter(params),
+            )?;
+        }
+        if let Some(t) = body.asset_type.as_ref().filter(|t| !t.is_empty()) {
+            c.execute(
+                &format!("UPDATE assets SET asset_type = ? WHERE id IN ({m})"),
+                params_from_iter(with_ids(t.clone().into())),
+            )?;
+        }
+        if let Some(f) = body.favorite {
+            c.execute(
+                &format!("UPDATE assets SET favorite = ? WHERE id IN ({m})"),
+                params_from_iter(with_ids((f as i64).into())),
+            )?;
+        }
+        c.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM asset_tags)", [])?;
+        reindex_fts(c, Some(ids))?;
+        Ok(())
+    })?;
+    ok()
+}
+
 // ---------------------------------------------------------------- tags
 
 async fn list_tags(State(s): St) -> ApiResult {
@@ -507,6 +563,54 @@ async fn list_tags(State(s): St) -> ApiResult {
         Ok(rows)
     })?;
     Ok(Json(rows.into()))
+}
+
+fn assets_with_tag(c: &Connection, tag_id: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = c.prepare("SELECT asset_id FROM asset_tags WHERE tag_id = ?")?;
+    let ids = stmt.query_map(params![tag_id], |r| r.get(0))?.collect();
+    ids
+}
+
+fn tag_id(c: &Connection, name: &str) -> rusqlite::Result<Option<i64>> {
+    c.query_row("SELECT id FROM tags WHERE name = ?", params![name], |r| r.get(0)).optional()
+}
+
+#[derive(Deserialize)]
+struct TagRename {
+    new_name: String,
+}
+
+/// Rename a tag; if the new name exists, the two are merged.
+async fn rename_tag(State(s): St, Path(name): Path<String>, Json(body): Json<TagRename>) -> ApiResult {
+    let (old, new) = (normalize_tag(&name), normalize_tag(&body.new_name));
+    if new.is_empty() || old == new {
+        return ok();
+    }
+    s.tx(|c| {
+        let old_id = tag_id(c, &old)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "Tag not found"))?;
+        let affected = assets_with_tag(c, old_id)?;
+        let new_id = get_or_create_tags(c, &[&new])?[0];
+        c.execute(
+            "INSERT OR IGNORE INTO asset_tags SELECT asset_id, ? FROM asset_tags WHERE tag_id = ?",
+            params![new_id, old_id],
+        )?;
+        c.execute("DELETE FROM tags WHERE id = ?", params![old_id])?;
+        reindex_fts(c, Some(&affected))?;
+        Ok(())
+    })?;
+    ok()
+}
+
+async fn delete_tag(State(s): St, Path(name): Path<String>) -> ApiResult {
+    s.tx(|c| {
+        if let Some(id) = tag_id(c, &normalize_tag(&name))? {
+            let affected = assets_with_tag(c, id)?;
+            c.execute("DELETE FROM tags WHERE id = ?", params![id])?;
+            reindex_fts(c, Some(&affected))?;
+        }
+        Ok(())
+    })?;
+    ok()
 }
 
 // ---------------------------------------------------------------- files
