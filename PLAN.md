@@ -32,8 +32,11 @@ Real-library checks (copy of the golden DB, source path rewritten to `/mnt/c/...
 Waiting on the user: send a `bench` build to the friend with the weakest machine, then
 decide on int8 and low-end defaults (batch size, threads).
 
-1. Start M6: serve `../asset-library/app/static` (copy it into the crate and embed it),
-   then `tools/diff_servers.py` to diff both servers on copies of the real DB.
+M6: the UI (copied from the original into `crates/asset-library/static`) is embedded in
+the binary. `tools/diff_servers.py` on the real library: 245/245 deterministic responses
+identical, and image search identical (20/20 top-20, 100/100 top-100) on every query.
+
+1. Start M7: `crates/desktop` (Tauri v2) hosting the same server on a random localhost port.
 
 ## Milestones
 
@@ -49,7 +52,7 @@ decide on int8 and low-end defaults (batch size, threads).
       suggestions; compare against golden embeddings and suggestions. Add an
       `asset-library bench` subcommand and send an early build to the friend with the weakest
       machine (images/sec, peak RAM) to decide on int8 and low-end defaults.
-- [ ] **M6 Full-library diff.** Serve the existing `static/` UI; run both servers on copies of
+- [x] **M6 Full-library diff.** Serve the existing `static/` UI; run both servers on copies of
       the real DB and diff query results (`tools/diff_servers.py`).
 - [ ] **M7 Desktop app.** Tauri window, per-user data dir, migrations, native folder picker,
       native drag-out, tray, single instance, settings (AI opt-in with model download, CPU
