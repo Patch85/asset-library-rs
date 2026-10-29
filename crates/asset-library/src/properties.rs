@@ -58,8 +58,7 @@ const FIELD_COLS: &str = "id, asset_type, key, label, kind, options, position";
 
 pub fn list_fields(c: &Connection) -> rusqlite::Result<Vec<Field>> {
     let mut stmt = c.prepare(&format!("SELECT {FIELD_COLS} FROM fields ORDER BY asset_type, position, id"))?;
-    let rows = stmt.query_map([], row_field)?.collect();
-    rows
+    stmt.query_map([], row_field)?.collect()
 }
 
 pub fn get_field(c: &Connection, id: i64) -> Result<Field> {
@@ -162,8 +161,7 @@ pub fn update_field(c: &Connection, id: i64, p: FieldPatch) -> Result<Field> {
         // Move within the type's order, shifting the others.
         let mut ids: Vec<i64> = {
             let mut stmt = c.prepare("SELECT id FROM fields WHERE asset_type = ? ORDER BY position, id")?;
-            let ids = stmt.query_map(params![f.asset_type], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-            ids
+            stmt.query_map(params![f.asset_type], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
         };
         ids.retain(|&x| x != id);
         ids.insert((pos.max(0) as usize).min(ids.len()), id);
@@ -325,8 +323,7 @@ pub fn retype(c: &Connection, ids: &[i64], new_type: &str) -> rusqlite::Result<(
     for &id in ids {
         let held: Vec<i64> = {
             let mut stmt = c.prepare("SELECT field_id FROM asset_fields WHERE asset_id = ?")?;
-            let held = stmt.query_map(params![id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-            held
+            stmt.query_map(params![id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
         };
         for fid in held {
             let moved_to = key_of.get(&fid).and_then(|k| target?.get(k)).map(|f| f.id);
@@ -422,8 +419,7 @@ pub fn promote_tag(c: &Connection, tag: &str, key: &str, value: &Value) -> Resul
     };
     let ids: Vec<i64> = {
         let mut stmt = c.prepare("SELECT asset_id FROM asset_tags WHERE tag_id = ?")?;
-        let ids = stmt.query_map(params![tag_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-        ids
+        stmt.query_map(params![tag_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
     };
     let fields = fields_by_type(c)?;
     let key = key.to_lowercase();
@@ -613,6 +609,14 @@ fn majority(c: &Connection, field_id: i64, aid: i64, filter: &str, params: Vec<S
     })
 }
 
+struct AssetInfo {
+    asset_type: String,
+    source_id: i64,
+    width: Option<i64>,
+    height: Option<i64>,
+    rel: String,
+}
+
 /// Per asset: at most one suggestion per unset property, best first. Sources: filename
 /// words, same pixel size in the same source, same folder, and look-alikes.
 pub fn suggest_fields(
@@ -623,17 +627,16 @@ pub fn suggest_fields(
     let fields = fields_by_type(c)?;
     let ignored: std::collections::HashSet<String> = {
         let mut stmt = c.prepare("SELECT tag FROM suggestion_ignore")?;
-        let r = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-        r
+        stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
     };
     let current = values_for(c, asset_ids)?;
     let mut out = Vec::new();
     for &aid in asset_ids {
-        let Some((asset_type, source_id, width, height, rel)): Option<(String, i64, Option<i64>, Option<i64>, String)> = c
+        let Some(AssetInfo { asset_type, source_id, width, height, rel }) = c
             .query_row(
                 "SELECT asset_type, source_id, width, height, rel_path FROM assets WHERE id = ?",
                 params![aid],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok(AssetInfo { asset_type: r.get(0)?, source_id: r.get(1)?, width: r.get(2)?, height: r.get(3)?, rel: r.get(4)? }),
             )
             .optional()?
         else {
