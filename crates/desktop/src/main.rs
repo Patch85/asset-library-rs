@@ -96,9 +96,14 @@ fn config(app: &AppHandle) -> anyhow::Result<Config> {
     Ok(cfg)
 }
 
-/// Serve the API on a random localhost port from a background runtime; returns the port.
+/// The UI keeps preferences (sort, thumbnail size, zoom) in localStorage, which is per
+/// origin, so use the same port every launch when it's free.
+const PREFERRED_PORT: u16 = 47_651;
+
+/// Serve the API on localhost from a background runtime; returns the port.
 fn start_server(state: Arc<AppState>) -> anyhow::Result<u16> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", PREFERRED_PORT))
+        .or_else(|_| std::net::TcpListener::bind(("127.0.0.1", 0)))?;
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     std::thread::Builder::new().name("server".into()).spawn(move || {
