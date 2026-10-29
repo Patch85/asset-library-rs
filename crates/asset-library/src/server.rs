@@ -49,7 +49,18 @@ pub fn open(cfg: &Config, opts: Options) -> anyhow::Result<Arc<AppState>> {
     }))
 }
 
+/// Serve the API. `ASSET_LIBRARY_LOG=1` logs each request to stderr.
 pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> std::io::Result<()> {
-    let app = api::router(state);
+    let mut app = api::router(state);
+    if std::env::var_os("ASSET_LIBRARY_LOG").is_some() {
+        app = app.layer(axum::middleware::from_fn(log_request));
+    }
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
+}
+
+async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let (method, uri, start) = (req.method().clone(), req.uri().clone(), std::time::Instant::now());
+    let resp = next.run(req).await;
+    eprintln!("{method} {uri} {} {:.0?}", resp.status().as_u16(), start.elapsed());
+    resp
 }
