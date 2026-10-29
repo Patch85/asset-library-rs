@@ -915,10 +915,10 @@ async fn original(State(s): St, Path(id): Path<i64>, Query(q): Query<FileParams>
     let data = tokio::task::block_in_place(|| loc.read()).map_err(|_| err(StatusCode::NOT_FOUND, "File missing on disk"))?;
     let name = loc.file_name();
     let mut resp = ([(header::CONTENT_TYPE, mime_type(FsPath::new(&name)))], data).into_response();
-    if q.download {
-        if let Ok(v) = content_disposition(&name).parse() {
-            resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
-        }
+    if q.download
+        && let Ok(v) = content_disposition(&name).parse()
+    {
+        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
     }
     Ok(resp)
 }

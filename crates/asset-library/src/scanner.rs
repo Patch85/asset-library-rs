@@ -20,8 +20,11 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
 
+use rayon::prelude::*;
+
 use crate::config::IMAGE_EXTENSIONS;
 use crate::db::{Database, get_or_create_tags, marks, reindex_fts};
+use crate::ddpack;
 
 #[derive(Clone, Default, Serialize)]
 pub struct ScanStatus {
@@ -58,6 +61,55 @@ struct Known {
     mtime: f64,
     missing: bool,
     width: Option<i64>,
+    hash: String,
+    /// The pack holding it, for Dungeondraft pack entries.
+    container: Option<String>,
+}
+
+/// A pack the scanner (re-)read, to record in `containers`.
+struct PackRecord {
+    rel: String,
+    size: i64,
+    mtime: f64,
+    name: String,
+    author: String,
+    version: String,
+}
+
+/// What every entry of one pack shares.
+struct PackShared {
+    path: PathBuf,
+    rel: String,
+    name: String,
+    mtime: f64,
+    tags: HashMap<String, Vec<String>>,
+}
+
+/// An image inside a pack that the index doesn't have yet.
+struct NewEntry {
+    pack: Arc<PackShared>,
+    inner: String,
+    offset: u64,
+    size: u64,
+    asset_type: &'static str,
+    kind: String,
+    folders: Vec<String>,
+}
+
+impl NewEntry {
+    fn rel(&self) -> String {
+        format!("{}/{}", self.pack.rel, self.inner)
+    }
+}
+
+/// Width, height, has transparency.
+type Info = (u32, u32, bool);
+
+/// Entries are decoded and hashed in parallel, then written in one transaction, per chunk.
+const ENTRY_CHUNK: usize = 256;
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    Sha1::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 impl Scanner {
@@ -110,7 +162,7 @@ impl Scanner {
     }
 
     fn scan(&self, source_id: i64) -> anyhow::Result<()> {
-        let (src, known) = self.db.tx(|c| -> anyhow::Result<_> {
+        let (src, known, packs_seen) = self.db.tx(|c| -> anyhow::Result<_> {
             let src = c
                 .query_row(
                     "SELECT path, name, asset_type, folder_tags FROM sources WHERE id = ?",
@@ -127,7 +179,8 @@ impl Scanner {
                 .optional()?;
             let Some(src) = src else { bail!("No source {source_id}") };
             let mut stmt = c.prepare(
-                "SELECT id, rel_path, size, mtime, missing, width FROM assets WHERE source_id = ?",
+                "SELECT id, rel_path, size, mtime, missing, width, file_hash, container
+                 FROM assets WHERE source_id = ?",
             )?;
             let known = stmt
                 .query_map(params![source_id], |r| {
@@ -139,11 +192,17 @@ impl Scanner {
                             mtime: r.get(3)?,
                             missing: r.get(4)?,
                             width: r.get(5)?,
+                            hash: r.get(6)?,
+                            container: r.get(7)?,
                         },
                     ))
                 })?
                 .collect::<rusqlite::Result<HashMap<_, _>>>()?;
-            Ok((src, known))
+            let mut stmt = c.prepare("SELECT rel_path, size, mtime FROM containers WHERE source_id = ?")?;
+            let packs_seen = stmt
+                .query_map(params![source_id], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)?, r.get::<_, f64>(2)?))))?
+                .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+            Ok((src, known, packs_seen))
         })?;
         let root = PathBuf::from(&src.path);
         self.status().source = src.name.clone();
@@ -156,8 +215,10 @@ impl Scanner {
         let mut touched: Vec<i64> = Vec::new();
         let mut remove: Vec<i64> = Vec::new();
 
+        let (images, packs) = iter_files(&root);
+
         // Pass 1: refresh known files, collect new ones.
-        for (full, rel) in iter_images(&root) {
+        for (full, rel) in images {
             self.status().processed += 1;
             seen.insert(rel.clone());
             let Some(row) = known.get(&rel) else {
@@ -199,6 +260,119 @@ impl Scanner {
                 )
             })?;
             self.status().updated += 1;
+        }
+
+        // Dungeondraft packs: same idea, per entry; unchanged packs aren't opened.
+        let mut by_pack: HashMap<&str, Vec<(&String, &Known)>> = HashMap::new();
+        for (rel, k) in &known {
+            if let Some(c) = &k.container {
+                by_pack.entry(c.as_str()).or_default().push((rel, k));
+            }
+        }
+        let mut pack_records: Vec<PackRecord> = Vec::new();
+        let mut new_entries: Vec<NewEntry> = Vec::new();
+        for (full, prel) in &packs {
+            let here = by_pack.get(prel.as_str()).cloned().unwrap_or_default();
+            let keep_known = |seen: &mut HashSet<String>| {
+                seen.extend(here.iter().map(|(rel, _)| (*rel).clone()));
+                self.status().processed += here.len() as u64;
+            };
+            let md = match fs::metadata(full) {
+                Ok(md) => md,
+                Err(e) => {
+                    self.file_error(prel, e);
+                    keep_known(&mut seen);
+                    continue;
+                }
+            };
+            let (size, mt) = (md.len() as i64, mtime(&md));
+            if packs_seen.get(prel) == Some(&(size, mt)) {
+                keep_known(&mut seen);
+                let back: Vec<i64> = here.iter().filter(|(_, k)| k.missing).map(|(_, k)| k.id).collect();
+                if !back.is_empty() {
+                    self.db.tx(|c| {
+                        let mut stmt = c.prepare("UPDATE assets SET missing = 0 WHERE id = ?")?;
+                        for id in &back {
+                            stmt.execute(params![id])?;
+                        }
+                        Ok::<_, rusqlite::Error>(())
+                    })?;
+                }
+                continue;
+            }
+            let pack = match ddpack::open(full) {
+                Ok(p) => p,
+                Err(e) => {
+                    // A half-downloaded pack shouldn't flag its known entries as missing.
+                    self.file_error(prel, e);
+                    keep_known(&mut seen);
+                    continue;
+                }
+            };
+            pack_records.push(PackRecord {
+                rel: prel.clone(),
+                size,
+                mtime: mt,
+                name: pack.name.clone(),
+                author: pack.author.clone(),
+                version: pack.version.clone(),
+            });
+            let shared =
+                Arc::new(PackShared { path: full.clone(), rel: prel.clone(), name: pack.name, mtime: mt, tags: pack.tags });
+            let mut changed: Vec<(&Known, ddpack::Entry)> = Vec::new();
+            for e in pack.entries {
+                let Some((kind, asset_type, folders)) = ddpack::classify(&e.path) else { continue };
+                let (kind, folders) = (ddpack::kind_value(kind), folders.iter().map(|f| f.to_string()).collect());
+                let rel = format!("{prel}/{}", e.path);
+                self.status().processed += 1;
+                seen.insert(rel.clone());
+                match known.get(&rel) {
+                    Some(k) => changed.push((k, e)),
+                    None => new_entries.push(NewEntry {
+                        pack: Arc::clone(&shared),
+                        inner: e.path,
+                        offset: e.offset,
+                        size: e.size,
+                        asset_type,
+                        kind,
+                        folders,
+                    }),
+                }
+            }
+            // The pack changed: entries may have moved within it or changed content.
+            for chunk in changed.chunks(ENTRY_CHUNK) {
+                let checked: Vec<Option<(String, Option<Info>)>> = chunk
+                    .par_iter()
+                    .map(|(k, e)| {
+                        let bytes = ddpack::read_entry(full, e.offset, e.size).ok()?;
+                        let hash = hash_bytes(&bytes);
+                        let info = if hash == k.hash && k.width.is_some() { None } else { image_info_bytes(&bytes) };
+                        Some((hash, info))
+                    })
+                    .collect();
+                self.db.tx(|c| -> rusqlite::Result<()> {
+                    for ((k, e), check) in chunk.iter().zip(checked) {
+                        let Some((hash, info)) = check else { continue };
+                        c.execute(
+                            "UPDATE assets SET entry_offset=?, entry_size=?, size=?, mtime=?, missing=0 WHERE id=?",
+                            params![e.offset as i64, e.size as i64, e.size as i64, mt, k.id],
+                        )?;
+                        if hash != k.hash || k.width.is_none() {
+                            match info {
+                                Some((w, h, alpha)) => {
+                                    c.execute(
+                                        "UPDATE assets SET file_hash=?, width=?, height=?, has_alpha=? WHERE id=?",
+                                        params![hash, w, h, alpha, k.id],
+                                    )?;
+                                    self.status().updated += 1;
+                                }
+                                None => remove.push(k.id),
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
         }
 
         // Not walked but still on disk => now excluded (e.g. __MACOSX); drop from index.
@@ -290,7 +464,97 @@ impl Scanner {
             }
         }
 
+        // Pass 2 for pack entries, a chunk at a time.
+        for chunk in new_entries.chunks(ENTRY_CHUNK) {
+            let read: Vec<Option<(String, Info)>> = chunk
+                .par_iter()
+                .map(|e| {
+                    let bytes = ddpack::read_entry(&e.pack.path, e.offset, e.size).ok()?;
+                    Some((hash_bytes(&bytes), image_info_bytes(&bytes)?))
+                })
+                .collect();
+            let done = self.db.tx(|c| -> rusqlite::Result<Vec<(i64, bool)>> {
+                let mut done = Vec::new();
+                for (e, r) in chunk.iter().zip(read) {
+                    let Some((digest, (w, h, alpha))) = r else {
+                        self.status().skipped += 1;
+                        continue;
+                    };
+                    let rel = e.rel();
+                    let (size, offset) = (e.size as i64, e.offset as i64);
+                    if let Some(id) = find_moved(c, &digest)? {
+                        c.execute(
+                            "UPDATE assets SET source_id=?, rel_path=?, size=?, mtime=?, container=?,
+                             entry_offset=?, entry_size=?, missing=0 WHERE id=?",
+                            params![source_id, rel, size, e.pack.mtime, e.pack.rel, offset, size, id],
+                        )?;
+                        done.push((id, true));
+                        continue;
+                    }
+                    c.execute(
+                        "INSERT INTO assets (source_id, rel_path, file_hash, size, mtime, width, height,
+                         has_alpha, asset_type, name, container, entry_offset, entry_size)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        params![
+                            source_id,
+                            rel,
+                            digest,
+                            size,
+                            e.pack.mtime,
+                            w,
+                            h,
+                            alpha,
+                            e.asset_type,
+                            display_name(&e.inner),
+                            e.pack.rel,
+                            offset,
+                            size
+                        ],
+                    )?;
+                    let id = c.last_insert_rowid();
+                    let mut tags: Vec<String> = e.pack.tags.get(&e.inner).cloned().unwrap_or_default();
+                    if src.folder_tags {
+                        tags.extend(e.folders.iter().cloned());
+                    }
+                    for tag_id in get_or_create_tags(c, &tags)? {
+                        c.execute("INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) VALUES (?,?)", params![id, tag_id])?;
+                    }
+                    // Pack and Kind, where this type has them; a kind that isn't one of the
+                    // choices (a folder Dungeondraft added later) is left unset.
+                    for (key, value) in [("pack", &e.pack.name), ("kind", &e.kind)] {
+                        let values = serde_json::Map::from_iter([(key.to_string(), serde_json::Value::from(value.as_str()))]);
+                        let _ = crate::properties::set_values(c, &[id], &values, false);
+                    }
+                    done.push((id, false));
+                }
+                Ok(done)
+            })?;
+            let mut st = self.status();
+            for (id, moved) in done {
+                touched.push(id);
+                if moved {
+                    st.moved += 1;
+                    st.missing = st.missing.saturating_sub(1);
+                } else {
+                    st.added += 1;
+                }
+            }
+        }
+
         self.db.tx(|c| -> rusqlite::Result<()> {
+            for p in &pack_records {
+                c.execute(
+                    "INSERT INTO containers (source_id, rel_path, size, mtime, name, author, version)
+                     VALUES (?,?,?,?,?,?,?)
+                     ON CONFLICT(source_id, rel_path) DO UPDATE SET size=excluded.size, mtime=excluded.mtime,
+                       name=excluded.name, author=excluded.author, version=excluded.version",
+                    params![source_id, p.rel, p.size, p.mtime, p.name, p.author, p.version],
+                )?;
+            }
+            let walked: HashSet<&str> = packs.iter().map(|(_, r)| r.as_str()).collect();
+            for gone in packs_seen.keys().filter(|r| !walked.contains(r.as_str())) {
+                c.execute("DELETE FROM containers WHERE source_id = ? AND rel_path = ?", params![source_id, gone])?;
+            }
             if !remove.is_empty() {
                 let m = marks(remove.len());
                 c.execute(
@@ -312,19 +576,24 @@ impl Scanner {
     }
 }
 
-/// An existing asset with this hash whose file no longer exists on disk.
+/// An existing asset with this hash whose file no longer exists on disk. A pack entry
+/// counts as gone when it's flagged missing or its pack is gone (its rel path is never a file).
 fn find_moved(c: &Connection, digest: &str) -> rusqlite::Result<Option<i64>> {
-    let mut stmt = c.prepare(
-        "SELECT a.id, a.rel_path, s.path FROM assets a
+    let mut stmt = c.prepare_cached(
+        "SELECT a.id, a.rel_path, s.path, a.container, a.missing FROM assets a
          JOIN sources s ON s.id = a.source_id WHERE a.file_hash = ?
          ORDER BY a.missing DESC",
     )?;
     let rows = stmt.query_map(params![digest], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, bool>(4)?))
     })?;
     for row in rows {
-        let (id, rel, root) = row?;
-        if !join_rel(Path::new(&root), &rel).exists() {
+        let (id, rel, root, container, missing) = row?;
+        let gone = match container {
+            Some(pack) => missing || !join_rel(Path::new(&root), &pack).exists(),
+            None => !join_rel(Path::new(&root), &rel).exists(),
+        };
+        if gone {
             return Ok(Some(id));
         }
     }
@@ -366,6 +635,15 @@ pub fn file_hash(path: &Path) -> io::Result<String> {
 /// image. Like Pillow, only the header is read unless the format can carry alpha.
 pub fn image_info(path: &Path) -> Option<(u32, u32, bool)> {
     let decoder = ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_decoder().ok()?;
+    decoder_info(decoder)
+}
+
+pub fn image_info_bytes(bytes: &[u8]) -> Option<(u32, u32, bool)> {
+    let decoder = ImageReader::new(io::Cursor::new(bytes)).with_guessed_format().ok()?.into_decoder().ok()?;
+    decoder_info(decoder)
+}
+
+fn decoder_info(decoder: impl ImageDecoder) -> Option<(u32, u32, bool)> {
     let (w, h) = decoder.dimensions();
     if !decoder.color_type().has_alpha() {
         return Some((w, h, false));

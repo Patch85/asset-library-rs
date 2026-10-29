@@ -153,6 +153,9 @@ impl Database {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // Safe with WAL (no corruption on power loss, at most the last commits are lost) and
+        // much faster for the scanner's many small transactions.
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         migrate(&mut conn)?;
         Ok(Self { conn: Mutex::new(conn) })
     }
