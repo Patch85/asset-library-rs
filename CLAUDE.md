@@ -38,6 +38,7 @@ cargo test --workspace                                 # unit tests + golden com
 parity/.venv/bin/python tools/make_golden.py           # regenerate fixtures/golden from ../asset-library
 parity/.venv/bin/python tools/diff_servers.py          # both servers on copies of the real library
 cargo run -p asset-library-desktop                     # the Tauri app
+tools/build_windows.sh                                 # Windows NSIS installer, cross-built from WSL
 target/release/asset-library bench <folder>            # speed and memory on this machine
 ```
 

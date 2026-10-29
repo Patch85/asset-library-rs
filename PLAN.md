@@ -49,11 +49,15 @@ brings in all 6785 assets without changing the source DB.
   the per-user data dir, so changing it later strands existing libraries.
 - Icons in `crates/desktop/icons` are generated placeholders; the user is fine with them.
 
-### Next: local Windows installer
+### Local Windows installer
 
-Cross-compile an NSIS installer from WSL (`cargo tauri build --runner cargo-xwin --target
-x86_64-pc-windows-msvc`). Needs `sudo apt install -y nsis lld llvm clang` (user runs it), then
-user-space `rustup target add x86_64-pc-windows-msvc` and `cargo install tauri-cli cargo-xwin`.
+`tools/build_windows.sh` cross-builds an unsigned NSIS installer from WSL into
+`target/x86_64-pc-windows-msvc/release/bundle/nsis/` (`tools/build_windows.sh check` only
+type-checks). Needs `sudo apt install -y nsis lld llvm clang`, `rustup target add
+x86_64-pc-windows-msvc`, `cargo install tauri-cli cargo-xwin`. Workarounds in the script:
+`-msse4.1` for libwebp under clang-cl, and an NSIS overlay adding `Win/RestartManager.nsh`
+(missing from Ubuntu 22.04's NSIS 3.08) through a `makensis` wrapper, because tauri-bundler
+clears `NSISDIR`. First build: 2026-10-28, 11.3 MiB, awaiting the user's test on Windows.
 
 ### Results so far
 
