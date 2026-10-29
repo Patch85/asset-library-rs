@@ -1,8 +1,8 @@
 """Black-box harness: run an Asset Library server as a subprocess and test it over HTTP.
 
-PARITY_IMPL=python (default) runs the original in ../asset-library; PARITY_IMPL=rust runs
-the port. Tests may also touch the on-disk format (library.db, thumbs/), which is part of
-the contract both implementations share.
+PARITY_IMPL=rust (default) runs this app; PARITY_IMPL=python runs the original in
+../asset-library, which only the tests from before the port diverged (M0-M6) apply to.
+Tests may also touch the on-disk format (library.db, thumbs/).
 """
 
 import os
@@ -22,7 +22,8 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 ORIGINAL = Path(os.environ.get("ASSET_LIBRARY_ORIGINAL", ROOT.parent / "asset-library"))
 MODELS = Path(os.environ.get("PARITY_MODELS", ROOT / "models"))
-IMPL = os.environ.get("PARITY_IMPL", "python")
+IMPL = os.environ.get("PARITY_IMPL", "rust")
+rust_only = pytest.mark.skipif(IMPL != "rust", reason="feature added after the port diverged")
 RUST_BIN = Path(os.environ.get("PARITY_RUST_BIN", ROOT / "target" / "debug" / "asset-library"))
 IMAGE_MODEL = "Qdrant/clip-ViT-B-32-vision"
 EMBED_DIM = 512
