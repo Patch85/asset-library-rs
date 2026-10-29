@@ -52,7 +52,24 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/suggestions/ignored/{tag}", axum::routing::delete(unignore_suggestion))
         .route("/api/tags", get(list_tags))
         .route("/api/tags/{name}", patch(rename_tag).delete(delete_tag))
+        .fallback(get(static_file))
         .with_state(state)
+}
+
+/// The web UI, embedded at build time (from the original's `app/static`).
+const STATIC: &[(&str, &str, &[u8])] = &[
+    ("index.html", "text/html; charset=utf-8", include_bytes!("../static/index.html")),
+    ("app.js", "text/javascript; charset=utf-8", include_bytes!("../static/app.js")),
+    ("styles.css", "text/css; charset=utf-8", include_bytes!("../static/styles.css")),
+];
+
+async fn static_file(uri: axum::http::Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    match STATIC.iter().find(|(name, _, _)| *name == path) {
+        Some((_, mime, body)) => ([(header::CONTENT_TYPE, *mime)], *body).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "detail": "Not Found" }))).into_response(),
+    }
 }
 
 impl AppState {

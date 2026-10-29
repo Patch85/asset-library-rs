@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Asset Library</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Asset Library</div>
+    <div class="search">
+      <input id="q" type="search" placeholder='Search…  e.g. goblin tag:archer color:red  or  ~"winged lizard with a spear"'  autocomplete="off">
+      <button id="help-btn" class="ghost" title="Search syntax">?</button>
+    </div>
+    <select id="sort" title="Sort"></select>
+    <input id="zoom" type="range" min="80" max="260" value="140" title="Thumbnail size">
+    <button id="scan-btn">Rescan</button>
+    <span id="scan-status" class="muted"></span>
+  </header>
+
+  <div class="layout">
+    <nav class="sidebar">
+      <section>
+        <h3>Library</h3>
+        <ul class="nav" id="quick">
+          <li data-q="">All</li>
+          <li data-q="is:fav">Favorites</li>
+          <li data-q="is:untagged">Untagged</li>
+          <li data-q="is:missing">Missing files</li>
+        </ul>
+      </section>
+      <section>
+        <h3>Types</h3>
+        <ul class="nav" id="types"></ul>
+      </section>
+      <section>
+        <h3>Colors</h3>
+        <div id="colors" class="swatches"></div>
+      </section>
+      <section>
+        <h3>Sources <button id="add-source" class="ghost small" title="Add folder">+</button></h3>
+        <ul class="nav" id="sources"></ul>
+      </section>
+      <section class="grow">
+        <h3>Tags</h3>
+        <input id="tag-filter" type="search" placeholder="Filter tags…">
+        <ul class="nav tags" id="tags"></ul>
+      </section>
+    </nav>
+
+    <main id="main">
+      <div class="resultbar">
+        <span id="count" class="muted"></span>
+        <span id="sel-count"></span>
+      </div>
+      <div id="grid" class="grid"></div>
+      <div id="empty" class="empty hidden"></div>
+      <div id="sentinel"></div>
+    </main>
+
+    <aside id="detail" class="detail hidden"></aside>
+  </div>
+
+  <dialog id="source-dialog">
+    <form method="dialog">
+      <h2>Add a folder</h2>
+      <p class="muted">Files are indexed where they are. Nothing is moved or copied.</p>
+      <label>Folder
+        <span class="row"><input name="path" required placeholder="D:\TTRPG\Tokens">
+        <button type="button" class="browse">Browse…</button></span>
+      </label>
+      <label>Display name <input name="name" placeholder="(folder name)"></label>
+      <label>Asset type <select name="asset_type"></select></label>
+      <label class="check"><input type="checkbox" name="folder_tags" checked>
+        Tag new files with their subfolder names</label>
+      <menu><button value="cancel" formnovalidate>Cancel</button><button value="ok" class="primary">Add &amp; scan</button></menu>
+    </form>
+  </dialog>
+
+  <dialog id="export-dialog">
+    <form method="dialog">
+      <h2>Export <span class="n"></span> items</h2>
+      <label class="check"><input type="checkbox" name="flatten" checked>
+        Flatten (don't recreate subfolders)</label>
+      <label>Copy to folder
+        <span class="row"><input name="dest" placeholder="e.g. C:\FoundryVTT\Data\tokens\session12">
+        <button type="button" class="browse">Browse…</button></span>
+      </label>
+      <menu>
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button value="zip">Download .zip</button>
+        <button value="folder" class="primary">Copy to folder</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="help-dialog">
+    <form method="dialog">
+      <h2>Search syntax</h2>
+      <table class="help">
+        <tr><td><code>goblin archer</code></td><td>words in name, folder, notes or tags (prefix match)</td></tr>
+        <tr><td><code>"fire giant"</code></td><td>exact phrase</td></tr>
+        <tr><td><code>-skeleton</code></td><td>exclude a word</td></tr>
+        <tr><td><code>tag:undead</code> <code>-tag:boss</code></td><td>require / exclude a tag</td></tr>
+        <tr><td><code>type:token</code></td><td>asset type</td></tr>
+        <tr><td><code>is:fav</code> <code>is:untagged</code> <code>is:transparent</code> <code>is:missing</code></td><td>flags</td></tr>
+        <tr><td><code>w&gt;=512</code> <code>h&lt;300</code></td><td>pixel dimensions</td></tr>
+        <tr><td><code>color:pink</code> <code>-color:black</code></td><td>dominant colours</td></tr>
+        <tr><td><code>~"lizard humanoid with a spear"</code></td><td>describe the image in plain words (AI)</td></tr>
+        <tr><td><code>similar:123</code></td><td>looks like asset 123 — or use <b>Find similar</b> (AI)</td></tr>
+      </table>
+      <p class="muted">Tip: describe an unusual creature with <code>~"..."</code>, select the hits, and tag them all at once.</p>
+      <h2>Keys</h2>
+      <table class="help">
+        <tr><td>Click / Ctrl-click / Shift-click</td><td>select / toggle / range</td></tr>
+        <tr><td>Ctrl+A, Esc</td><td>select all loaded / clear</td></tr>
+        <tr><td>/</td><td>focus search</td></tr>
+        <tr><td>F</td><td>toggle favorite on selection</td></tr>
+        <tr><td>T</td><td>focus tag input</td></tr>
+        <tr><td>Drag a thumbnail</td><td>drop the original file into a folder or VTT</td></tr>
+      </table>
+      <menu><button class="primary">Close</button></menu>
+    </form>
+  </dialog>
+
+  <dialog id="ignored-dialog">
+    <form method="dialog">
+      <h2>Never suggested</h2>
+      <p class="muted">These tags are never offered as suggestions. Remove one to allow it again.</p>
+      <div class="chips"></div>
+      <menu><button class="primary">Close</button></menu>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>
