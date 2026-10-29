@@ -78,8 +78,38 @@ CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
 );
 "#;
 
+/// Properties: per-type fields with one value per asset (see PLAN.md, M8).
+const PROPERTIES_V2: &str = r#"
+CREATE TABLE fields (
+    id          INTEGER PRIMARY KEY,
+    asset_type  TEXT NOT NULL,
+    key         TEXT NOT NULL COLLATE NOCASE,   -- used in search: key:value
+    label       TEXT NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('choice', 'number', 'text')),
+    options     TEXT NOT NULL DEFAULT '[]',     -- JSON list of values, for choice fields
+    position    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (asset_type, key)
+);
+
+CREATE TABLE asset_fields (
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    field_id INTEGER NOT NULL REFERENCES fields(id) ON DELETE CASCADE,
+    value    NOT NULL,                          -- TEXT, or REAL for number fields
+    PRIMARY KEY (asset_id, field_id)
+);
+CREATE INDEX idx_asset_fields_value ON asset_fields(field_id, value);
+
+INSERT INTO fields (asset_type, key, label, kind, options, position) VALUES
+    ('token', 'view', 'View', 'choice', '["top-down","portrait","isometric","side"]', 0),
+    ('token', 'size', 'Size', 'choice', '["tiny","small","medium","large","huge","gargantuan"]', 1),
+    ('token', 'pack', 'Pack', 'text', '[]', 2),
+    ('map', 'grid', 'Grid (px per square)', 'number', '[]', 0),
+    ('map', 'variant', 'Variant', 'choice', '["day","night","dawn","dusk","rain","snow","fog"]', 1),
+    ('map', 'pack', 'Pack', 'text', '[]', 2);
+"#;
+
 /// Migration `i` takes the database from `user_version` i to i + 1.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, PROPERTIES_V2];
 
 /// One shared connection; like the original, every access is serialized.
 pub struct Database {
