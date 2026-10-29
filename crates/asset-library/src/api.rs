@@ -19,6 +19,7 @@ use crate::config::{ASSET_TYPES, COLOR_HEX};
 use crate::db::{Database, get_or_create_tags, marks, normalize_tag, reindex_fts};
 use crate::desktop::{Desktop, drag_icon};
 use crate::export;
+use crate::properties::{self, FieldPatch, Invalid, NewField};
 use crate::settings::Settings;
 use crate::jobs::Jobs;
 use crate::scanner::{Scanner, join_rel};
@@ -63,6 +64,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/export/zip-save", post(export_zip_save))
         .route("/api/import", post(import_library))
         .route("/api/tags/{name}", patch(rename_tag).delete(delete_tag))
+        .route("/api/tags/{name}/promote", post(promote_tag))
+        .route("/api/fields", get(list_fields).post(create_field))
+        .route("/api/fields/{id}", patch(update_field).delete(delete_field))
+        .route("/api/facets", get(facets))
         .fallback(get(static_file))
         .with_state(state)
 }
@@ -119,6 +124,13 @@ fn err(status: StatusCode, detail: impl Into<String>) -> ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(json!({ "detail": self.1 }))).into_response()
+    }
+}
+
+impl From<Invalid> for ApiError {
+    fn from(e: Invalid) -> Self {
+        let status = if e.0.ends_with("not found") { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+        err(status, e.0)
     }
 }
 
@@ -408,6 +420,7 @@ struct ListItem {
     missing: bool,
     file_hash: String,
     tags: Vec<String>,
+    fields: Map<String, Value>,
 }
 
 async fn list_assets(State(s): St, Query(p): Query<ListParams>) -> ApiResult {
@@ -463,12 +476,16 @@ async fn list_assets(State(s): St, Query(p): Query<ListParams>) -> ApiResult {
                     missing: r.get(8)?,
                     file_hash: r.get(9)?,
                     tags: Vec::new(),
+                    fields: Map::new(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut tags = tags_for(c, &items.iter().map(|i| i.id).collect::<Vec<_>>())?;
+        let ids: Vec<i64> = items.iter().map(|i| i.id).collect();
+        let mut tags = tags_for(c, &ids)?;
+        let mut fields = properties::values_for(c, &ids)?;
         for item in &mut items {
             item.tags = tags.remove(&item.id).unwrap_or_default();
+            item.fields = fields.remove(&item.id).unwrap_or_default();
         }
         Ok((total, items))
     })?;
@@ -503,6 +520,7 @@ fn asset_json(c: &Connection, id: i64) -> ApiResult {
     colors.sort_by(|a, b| frac(&b.1).total_cmp(&frac(&a.1)));
     d.insert("colors".into(), Value::Object(colors.into_iter().collect()));
     d.insert("has_embedding".into(), f.is_some_and(|(_, e)| e).into());
+    d.insert("fields".into(), Value::Object(properties::values_for(c, &[id])?.remove(&id).unwrap_or_default()));
     Ok(Json(Value::Object(d)))
 }
 
@@ -519,6 +537,8 @@ struct AssetPatch {
     /// Replaces the full tag set.
     tags: Option<Vec<String>>,
     extra: Option<Map<String, Value>>,
+    /// Property values by key; null clears one.
+    fields: Option<Map<String, Value>>,
 }
 
 async fn update_asset(State(s): St, Path(id): Path<i64>, Json(body): Json<AssetPatch>) -> ApiResult {
@@ -526,6 +546,7 @@ async fn update_asset(State(s): St, Path(id): Path<i64>, Json(body): Json<AssetP
         asset_row(c, id)?;
         let mut sets: Vec<&str> = Vec::new();
         let mut vals: Vec<SqlValue> = Vec::new();
+        let retype_to = body.asset_type.clone();
         for (col, v) in [("name", body.name), ("notes", body.notes), ("asset_type", body.asset_type)] {
             if let Some(v) = v {
                 sets.push(col);
@@ -544,6 +565,12 @@ async fn update_asset(State(s): St, Path(id): Path<i64>, Json(body): Json<AssetP
             let sets: Vec<String> = sets.iter().map(|k| format!("{k} = ?")).collect();
             vals.push(id.into());
             c.execute(&format!("UPDATE assets SET {} WHERE id = ?", sets.join(", ")), params_from_iter(vals))?;
+        }
+        if let Some(t) = retype_to {
+            properties::retype(c, &[id], &t)?;
+        }
+        if let Some(fields) = &body.fields {
+            properties::set_values(c, &[id], fields, true)?;
         }
         if let Some(tags) = &body.tags {
             c.execute("DELETE FROM asset_tags WHERE asset_id = ?", params![id])?;
@@ -565,6 +592,9 @@ struct BulkIn {
     remove_tags: Vec<String>,
     asset_type: Option<String>,
     favorite: Option<bool>,
+    /// Property values by key, set on each asset whose type has the key; null clears.
+    #[serde(default)]
+    set_fields: Map<String, Value>,
 }
 
 async fn bulk_update(State(s): St, Json(body): Json<BulkIn>) -> ApiResult {
@@ -574,7 +604,7 @@ async fn bulk_update(State(s): St, Json(body): Json<BulkIn>) -> ApiResult {
     }
     let m = marks(ids.len());
     let with_ids = |first: SqlValue| std::iter::once(first).chain(ids.iter().map(|&i| i.into()));
-    s.tx(|c| {
+    s.tx(|c| -> ApiResult<()> {
         for tid in get_or_create_tags(c, &body.add_tags)? {
             let mut stmt = c.prepare("INSERT OR IGNORE INTO asset_tags VALUES (?, ?)")?;
             for id in ids {
@@ -596,6 +626,10 @@ async fn bulk_update(State(s): St, Json(body): Json<BulkIn>) -> ApiResult {
                 &format!("UPDATE assets SET asset_type = ? WHERE id IN ({m})"),
                 params_from_iter(with_ids(t.clone().into())),
             )?;
+            properties::retype(c, ids, t)?;
+        }
+        if !body.set_fields.is_empty() {
+            properties::set_values(c, ids, &body.set_fields, false)?;
         }
         if let Some(f) = body.favorite {
             c.execute(
@@ -1055,4 +1089,43 @@ async fn import_library(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>
     .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     s.jobs.start(); // recompute colours (and embeddings, if AI is on)
     Ok(Json(json!({ "assets": r.assets, "thumbnails": r.thumbnails, "copied_models": r.copied_models })))
+}
+
+// ---------------------------------------------------------------- properties
+
+async fn list_fields(State(s): St) -> ApiResult {
+    let fields = s.tx(|c| Ok(properties::list_fields(c)?))?;
+    Ok(Json(serde_json::to_value(fields).unwrap_or_default()))
+}
+
+async fn create_field(State(s): St, Json(body): Json<NewField>) -> ApiResult {
+    let f = s.tx(|c| Ok(properties::create_field(c, body)?))?;
+    Ok(Json(serde_json::to_value(f).unwrap_or_default()))
+}
+
+async fn update_field(State(s): St, Path(id): Path<i64>, Json(body): Json<FieldPatch>) -> ApiResult {
+    let f = s.tx(|c| Ok(properties::update_field(c, id, body)?))?;
+    Ok(Json(serde_json::to_value(f).unwrap_or_default()))
+}
+
+async fn delete_field(State(s): St, Path(id): Path<i64>) -> ApiResult {
+    s.tx(|c| Ok(properties::delete_field(c, id)?))?;
+    ok()
+}
+
+async fn facets(State(s): St) -> ApiResult {
+    let f = s.tx(|c| Ok(properties::facets(c)?))?;
+    Ok(Json(serde_json::to_value(f).unwrap_or_default()))
+}
+
+#[derive(Deserialize)]
+struct PromoteIn {
+    field: String,
+    value: Value,
+}
+
+/// Turn a tag into a property value on every asset that has it.
+async fn promote_tag(State(s): St, Path(name): Path<String>, Json(body): Json<PromoteIn>) -> ApiResult {
+    let r = s.tx(|c| Ok(properties::promote_tag(c, &name, &body.field, &body.value)?))?;
+    Ok(Json(serde_json::to_value(r).unwrap_or_default()))
 }
