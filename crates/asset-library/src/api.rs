@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::config::{ASSET_TYPES, COLOR_HEX};
-use crate::db::{Database, get_or_create_tags, marks, normalize_tag, reindex_fts};
+use crate::db::{CHUNK, Database, get_or_create_tags, marks, normalize_tag, reindex_fts};
 use crate::desktop::{Desktop, drag_icon};
 use crate::export;
 use crate::properties::{self, FieldPatch, Invalid, NewField};
@@ -624,8 +624,6 @@ async fn bulk_update(State(s): St, Json(body): Json<BulkIn>) -> ApiResult {
     if ids.is_empty() {
         return ok();
     }
-    let m = marks(ids.len());
-    let with_ids = |first: SqlValue| std::iter::once(first).chain(ids.iter().map(|&i| i.into()));
     s.tx(|c| -> ApiResult<()> {
         for tid in get_or_create_tags(c, &body.add_tags)? {
             let mut stmt = c.prepare("INSERT OR IGNORE INTO asset_tags VALUES (?, ?)")?;
@@ -633,31 +631,37 @@ async fn bulk_update(State(s): St, Json(body): Json<BulkIn>) -> ApiResult {
                 stmt.execute(params![id, tid])?;
             }
         }
-        for name in &body.remove_tags {
-            let params = ids.iter().map(|&i| SqlValue::from(i)).chain([normalize_tag(name).into()]);
-            c.execute(
-                &format!(
-                    "DELETE FROM asset_tags WHERE asset_id IN ({m})
-                     AND tag_id = (SELECT id FROM tags WHERE name = ?)"
-                ),
-                params_from_iter(params),
-            )?;
+        for chunk in ids.chunks(CHUNK) {
+            let m = marks(chunk.len());
+            let with_ids = |first: SqlValue| std::iter::once(first).chain(chunk.iter().map(|&i| i.into()));
+            for name in &body.remove_tags {
+                let params = chunk.iter().map(|&i| SqlValue::from(i)).chain([normalize_tag(name).into()]);
+                c.execute(
+                    &format!(
+                        "DELETE FROM asset_tags WHERE asset_id IN ({m})
+                         AND tag_id = (SELECT id FROM tags WHERE name = ?)"
+                    ),
+                    params_from_iter(params),
+                )?;
+            }
+            if let Some(t) = body.asset_type.as_ref().filter(|t| !t.is_empty()) {
+                c.execute(
+                    &format!("UPDATE assets SET asset_type = ? WHERE id IN ({m})"),
+                    params_from_iter(with_ids(t.clone().into())),
+                )?;
+            }
+            if let Some(f) = body.favorite {
+                c.execute(
+                    &format!("UPDATE assets SET favorite = ? WHERE id IN ({m})"),
+                    params_from_iter(with_ids((f as i64).into())),
+                )?;
+            }
         }
         if let Some(t) = body.asset_type.as_ref().filter(|t| !t.is_empty()) {
-            c.execute(
-                &format!("UPDATE assets SET asset_type = ? WHERE id IN ({m})"),
-                params_from_iter(with_ids(t.clone().into())),
-            )?;
             properties::retype(c, ids, t)?;
         }
         if !body.set_fields.is_empty() {
             properties::set_values(c, ids, &body.set_fields, false)?;
-        }
-        if let Some(f) = body.favorite {
-            c.execute(
-                &format!("UPDATE assets SET favorite = ? WHERE id IN ({m})"),
-                params_from_iter(with_ids((f as i64).into())),
-            )?;
         }
         c.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM asset_tags)", [])?;
         reindex_fts(c, Some(ids))?;

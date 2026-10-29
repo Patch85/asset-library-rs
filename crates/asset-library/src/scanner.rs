@@ -23,7 +23,7 @@ use sha1::{Digest, Sha1};
 use rayon::prelude::*;
 
 use crate::config::IMAGE_EXTENSIONS;
-use crate::db::{Database, get_or_create_tags, marks, reindex_fts};
+use crate::db::{CHUNK, Database, get_or_create_tags, marks, reindex_fts};
 use crate::ddpack;
 
 #[derive(Clone, Default, Serialize)]
@@ -556,12 +556,11 @@ impl Scanner {
                 c.execute("DELETE FROM containers WHERE source_id = ? AND rel_path = ?", params![source_id, gone])?;
             }
             if !remove.is_empty() {
-                let m = marks(remove.len());
-                c.execute(
-                    &format!("DELETE FROM assets_fts WHERE rowid IN ({m})"),
-                    params_from_iter(&remove),
-                )?;
-                c.execute(&format!("DELETE FROM assets WHERE id IN ({m})"), params_from_iter(&remove))?;
+                for chunk in remove.chunks(CHUNK) {
+                    let m = marks(chunk.len());
+                    c.execute(&format!("DELETE FROM assets_fts WHERE rowid IN ({m})"), params_from_iter(chunk))?;
+                    c.execute(&format!("DELETE FROM assets WHERE id IN ({m})"), params_from_iter(chunk))?;
+                }
                 c.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM asset_tags)", [])?;
             }
             self.status().removed = remove.len() as u64;

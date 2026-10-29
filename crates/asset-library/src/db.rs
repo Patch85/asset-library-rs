@@ -201,35 +201,38 @@ pub fn marks(n: usize) -> String {
     vec!["?"; n].join(",")
 }
 
+/// Ids per `IN (...)` list; SQLite allows at most 32,766 variables per statement.
+pub const CHUNK: usize = 900;
+
 /// Rebuild FTS rows for the given assets, or for all assets when `asset_ids` is `None`.
 pub fn reindex_fts(conn: &Connection, asset_ids: Option<&[i64]>) -> rusqlite::Result<()> {
-    let (filter, ids): (String, &[i64]) = match asset_ids {
-        Some([]) => return Ok(()),
-        Some(ids) => {
-            let m = marks(ids.len());
-            conn.execute(
-                &format!("DELETE FROM assets_fts WHERE rowid IN ({m})"),
-                params_from_iter(ids),
-            )?;
-            (format!("WHERE a.id IN ({m})"), ids)
-        }
+    let insert = |filter: &str, ids: &[i64]| {
+        conn.execute(
+            &format!(
+                r#"INSERT INTO assets_fts (rowid, name, path, notes, tags)
+                   SELECT a.id, a.name,
+                          replace(replace(replace(a.rel_path, '\', ' '), '/', ' '), '_', ' '),
+                          a.notes,
+                          coalesce((SELECT group_concat(t.name, ' ') FROM asset_tags at
+                                    JOIN tags t ON t.id = at.tag_id WHERE at.asset_id = a.id), '')
+                   FROM assets a {filter}"#
+            ),
+            params_from_iter(ids),
+        )
+    };
+    match asset_ids {
         None => {
             conn.execute("DELETE FROM assets_fts", [])?;
-            (String::new(), &[])
+            insert("", &[])?;
         }
-    };
-    conn.execute(
-        &format!(
-            r#"INSERT INTO assets_fts (rowid, name, path, notes, tags)
-               SELECT a.id, a.name,
-                      replace(replace(replace(a.rel_path, '\', ' '), '/', ' '), '_', ' '),
-                      a.notes,
-                      coalesce((SELECT group_concat(t.name, ' ') FROM asset_tags at
-                                JOIN tags t ON t.id = at.tag_id WHERE at.asset_id = a.id), '')
-               FROM assets a {filter}"#
-        ),
-        params_from_iter(ids),
-    )?;
+        Some(ids) => {
+            for chunk in ids.chunks(CHUNK) {
+                let m = marks(chunk.len());
+                conn.execute(&format!("DELETE FROM assets_fts WHERE rowid IN ({m})"), params_from_iter(chunk))?;
+                insert(&format!("WHERE a.id IN ({m})"), chunk)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -266,6 +269,29 @@ mod tests {
         assert_eq!(normalize_tag("  Low   Level "), "low-level");
         assert_eq!(normalize_tag("CR-1"), "cr-1");
         assert_eq!(normalize_tag("   "), "");
+    }
+
+    /// A scan can touch more assets than SQLite allows variables in one statement.
+    #[test]
+    fn reindexes_more_ids_than_sqlite_variables() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("library.db")).unwrap();
+        let n = 40_000;
+        db.tx(|c| {
+            c.execute("INSERT INTO sources (path, name) VALUES ('/x', 'x')", [])?;
+            let mut stmt = c.prepare(
+                "INSERT INTO assets (source_id, rel_path, file_hash, size, mtime, name) VALUES (1, ?, 'h', 1, 0, ?)",
+            )?;
+            for i in 0..n {
+                stmt.execute(params![format!("f{i}.png"), format!("goblin {i}")])?;
+            }
+            let ids: Vec<i64> = (1..=n).collect();
+            reindex_fts(c, Some(&ids))?;
+            let found: i64 = c.query_row("SELECT count(*) FROM assets_fts WHERE assets_fts MATCH 'goblin'", [], |r| r.get(0))?;
+            assert_eq!(found, n);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
     }
 
     #[test]
