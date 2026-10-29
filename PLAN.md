@@ -101,6 +101,34 @@ one value each, for how the asset is made or used (the real library hides creatu
   neighbours); majority among files in the same folder (pack).
 - "Move tag to property": set a field value on every asset with the tag, then drop the tag.
 
+## M9 design: Dungeondraft packs
+
+The user's 61 `.dungeondraft_pack` files hold ~92k images (7.3 GB): objects 86.8k, terrain
+1.5k, paths 1.4k, patterns 1.35k, portals 592, walls 355, tilesets 180, roofs 120, lights 72,
+materials 10. Format: Godot 3 PCK v1 (`GDPC`, file table of path/offset/size/md5) with
+`res://packs/<id>/pack.json` (name, id, version, author), `data/default.dungeondraft_tags`
+(`{"tags": {name: [paths]}, "sets": ...}`; 6 of 42 have trailing commas) and images stored
+as plain PNG/WebP under `textures/<kind>/...`.
+
+Decisions (user, 2026-10-29): index in place (no extraction to disk); Dungeondraft tags and
+in-pack folders both become tags; packs get the same background analysis as everything else.
+
+- Schema (migration 3): `assets.container` (the pack's path within the source),
+  `entry_offset`, `entry_size`; `containers(source_id, rel_path, size, mtime, name, author,
+  version)`. Entry `rel_path` = `<pack rel path>/<path inside packs/<id>/>`, so it's unique,
+  searchable and moves by hash when a pack is updated to a new file name.
+- Reading goes through one abstraction (plain file or pack entry by offset): thumbnails,
+  `/file`, export, zip. Drag and open first extract to `data/extracted/` (pruned after a week);
+  reveal shows the pack file.
+- Scanning: a pack is re-read only when its size or mtime changes; otherwise its known entries
+  count as seen. Type by folder: objects -> prop, terrain/patterns/materials -> texture,
+  tilesets -> tile, walls/paths/portals/roofs/lights -> other. New entries get Pack (pack.json
+  name) and Kind (the folder) properties; migration 3 adds `pack` to prop/tile/texture/other and
+  `kind` choices to texture/other. Tags: Dungeondraft tags (leading `.`/`[XX] ` dropped,
+  `Colorable`/`Testing` skipped) always; in-pack folders when the source has folder tags on.
+- Export (copy/zip) writes entry bytes out under `<pack name>/<inner path>`, and can export
+  every result of the current search, not just loaded/selected cards.
+
 ## Milestones
 
 - [x] **M0 Harness.** Black-box parity suite (`parity/`) passing against the Python original;
@@ -123,7 +151,8 @@ one value each, for how the asset is made or used (the real library hides creatu
       Python library.
 - [ ] **M8 Properties.** Editable per-type fields with search, facets, bulk edit, suggestions
       and tag-to-property moves (design above).
-- [ ] **M9 Release.** tauri-action matrix (Win/macOS/Linux), updater signing key, GitHub
+- [ ] **M9 Dungeondraft packs.** Index `.dungeondraft_pack` contents in place (design above).
+- [ ] **M10 Release.** tauri-action matrix (Win/macOS/Linux), updater signing key, GitHub
       Releases, in-app "new version" prompt.
 
 ## Known, accepted differences
@@ -164,3 +193,5 @@ one value each, for how the asset is made or used (the real library hides creatu
   importing Python libraries must keep working. `tools/diff_servers.py` and the golden
   comparisons stay as records but may start to differ by design.
 - 2026-10-28: Properties (M8) come before the release, with user-editable field definitions.
+- 2026-10-29: Dungeondraft packs (M9) are indexed in place before the release; their tags and
+  in-pack folders become tags.
