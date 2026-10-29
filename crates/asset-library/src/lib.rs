@@ -5,6 +5,7 @@ pub mod clip;
 pub mod config;
 pub mod db;
 pub mod export;
+pub mod import;
 pub mod jobs;
 pub mod power;
 pub mod scanner;

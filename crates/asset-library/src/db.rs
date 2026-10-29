@@ -111,6 +111,14 @@ impl Database {
         Ok(out)
     }
 
+    /// Replace the whole database with the one at `src`, then migrate it.
+    pub fn restore_from(&self, src: &Path) -> rusqlite::Result<()> {
+        let source = Connection::open(src)?;
+        let mut conn = self.lock();
+        rusqlite::backup::Backup::new(&source, &mut conn)?.run_to_completion(256, std::time::Duration::ZERO, None)?;
+        migrate(&mut conn)
+    }
+
     fn lock(&self) -> MutexGuard<'_, Connection> {
         // A panic mid-transaction rolls back on drop, so the connection is still usable.
         self.conn.lock().unwrap_or_else(|e| e.into_inner())

@@ -37,7 +37,13 @@ pub fn open(cfg: &Config, opts: Options) -> anyhow::Result<Arc<AppState>> {
     let analysis = Arc::new(Analysis::new(Arc::clone(&db), Arc::clone(&thumbs), clip, settings.get().ai));
     let jobs = Arc::new(Jobs::new(Arc::clone(&db), thumbs, analysis, settings));
     jobs.start(); // fill in any thumbnails/analysis not done yet
-    Ok(Arc::new(AppState { db, scanner, jobs }))
+    Ok(Arc::new(AppState {
+        db,
+        scanner,
+        jobs,
+        data_dir: cfg.data_dir.clone(),
+        model_dir: cfg.model_dir.clone(),
+    }))
 }
 
 pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> std::io::Result<()> {

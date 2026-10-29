@@ -28,6 +28,8 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub scanner: Arc<Scanner>,
     pub jobs: Arc<Jobs>,
+    pub data_dir: PathBuf,
+    pub model_dir: PathBuf,
 }
 
 type St = State<Arc<AppState>>;
@@ -53,6 +55,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/suggestions/ignored/{tag}", axum::routing::delete(unignore_suggestion))
         .route("/api/tags", get(list_tags))
         .route("/api/settings", get(get_settings).patch(update_settings))
+        .route("/api/import", post(import_library))
         .route("/api/tags/{name}", patch(rename_tag).delete(delete_tag))
         .fallback(get(static_file))
         .with_state(state)
@@ -911,7 +914,7 @@ async fn export_zip(State(s): St, Json(body): Json<ExportIn>) -> ApiResult<Respo
         .into_response())
 }
 
-// ---------------------------------------------------------------- settings
+// ---------------------------------------------------------------- settings and import
 
 async fn get_settings(State(s): St) -> ApiResult {
     let mut v = serde_json::to_value(s.jobs.settings.get()).unwrap_or_default();
@@ -939,4 +942,28 @@ async fn update_settings(State(s): St, Json(patch): Json<Map<String, Value>>) ->
         s.jobs.start(); // embed everything, downloading the model if needed
     }
     get_settings(State(s)).await
+}
+
+#[derive(Deserialize)]
+struct ImportIn {
+    path: String,
+}
+
+/// Import a library made by the Python app into this (empty) library.
+async fn import_library(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Json(body): Json<ImportIn>) -> ApiResult {
+    local_only(addr)?;
+    let sources: i64 = s.tx(|c| Ok(c.query_row("SELECT count(*) FROM sources", [], |r| r.get(0))?))?;
+    if sources > 0 {
+        return Err(err(StatusCode::CONFLICT, "Import needs an empty library; remove its folders first"));
+    }
+    if s.scanner.status().running {
+        return Err(err(StatusCode::CONFLICT, "A scan is running"));
+    }
+    let src = expand_user(body.path.trim());
+    let r = tokio::task::block_in_place(|| {
+        crate::import::import_python_library(&s.db, &src, &s.data_dir, &s.model_dir)
+    })
+    .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    s.jobs.start(); // recompute colours (and embeddings, if AI is on)
+    Ok(Json(json!({ "assets": r.assets, "thumbnails": r.thumbnails, "copied_models": r.copied_models })))
 }
