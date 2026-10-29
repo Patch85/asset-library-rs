@@ -12,22 +12,44 @@
 //! color:pink  -color:black   dominant colours
 //! ~"winged lizard with a spear"   plain-language image search (AI extra)
 //! similar:123                visually similar to asset 123 (AI extra)
+//! size:large  -view:portrait  pack:"forgotten adventures"   property values
+//! grid>=70                   number properties
+//! has:size  -has:size        property set / not set
 //! ```
 
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use regex::Regex;
 use rusqlite::types::Value;
 
 use crate::db::{marks, normalize_tag};
+use crate::properties::Field;
 
 /// Fraction of opaque pixels for `color:x` to match.
 const COLOR_MIN: f64 = 0.12;
 
 static TOKEN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(-?)(~?)(?:(\w+):)?("[^"]*"?|\S+)"#).unwrap());
-static DIM_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(-?)([wh])(>=|<=|>|<|=)(\d+)$").unwrap());
+static CMP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(-?)(\w+)(>=|<=|>|<|=)(\d+(?:\.\d+)?)$").unwrap());
+
+/// Property keys the query language should recognise (lowercase).
+#[derive(Default)]
+pub struct FieldKeys {
+    pub all: HashSet<String>,
+    pub numeric: HashSet<String>,
+}
+
+impl FieldKeys {
+    pub fn new(fields: &[Field]) -> Self {
+        let key = |f: &Field| f.key.to_lowercase();
+        Self {
+            all: fields.iter().map(key).collect(),
+            numeric: fields.iter().filter(|f| f.kind == "number").map(key).collect(),
+        }
+    }
+}
 
 /// Sort name to ORDER BY clause, in the order the UI lists them.
 pub const SORTS: &[(&str, &str)] = &[
@@ -58,6 +80,13 @@ pub struct Query {
     pub not_colors: Vec<String>,
     pub semantic: Vec<String>,
     pub similar: Option<i64>,
+    /// (property key, value)
+    pub props: Vec<(String, String)>,
+    pub not_props: Vec<(String, String)>,
+    /// (property key, operator, number)
+    pub prop_cmps: Vec<(String, String, f64)>,
+    pub has: Vec<String>,
+    pub not_has: Vec<String>,
 }
 
 impl Query {
@@ -73,7 +102,12 @@ fn digits(s: &str) -> Option<i64> {
     s.parse().ok()
 }
 
+/// Parse without properties (`key:value` for unknown keys is text).
 pub fn parse(q: &str) -> Query {
+    parse_with(q, &FieldKeys::default())
+}
+
+pub fn parse_with(q: &str, fields: &FieldKeys) -> Query {
     let mut out = Query::default();
     for m in TOKEN_RE.captures_iter(q) {
         let neg = !m[1].is_empty();
@@ -87,13 +121,22 @@ pub fn parse(q: &str) -> Query {
             continue;
         }
         if key.is_empty()
-            && let Some(d) = DIM_RE.captures(&m[0])
+            && let Some(d) = CMP_RE.captures(&m[0])
         {
-            if let Ok(n) = d[4].parse() {
-                let col = if &d[2] == "w" { "width" } else { "height" };
-                out.dims.push((col, d[3].to_string(), n));
+            let name = d[2].to_lowercase();
+            if name == "w" || name == "h" {
+                if let Ok(n) = d[4].parse() {
+                    let col = if name == "w" { "width" } else { "height" };
+                    out.dims.push((col, d[3].to_string(), n));
+                }
+                continue;
             }
-            continue;
+            if fields.numeric.contains(&name) {
+                if let Ok(n) = d[4].parse() {
+                    out.prop_cmps.push((name, d[3].to_string(), n));
+                }
+                continue;
+            }
         }
         let val = raw.trim_matches('"');
         if val.is_empty() {
@@ -108,6 +151,10 @@ pub fn parse(q: &str) -> Query {
             }
             "similar" if digits(val).is_some() => out.similar = digits(val),
             "is" => (if neg { &mut out.not_flags } else { &mut out.flags }).push(val.to_lowercase()),
+            "has" => (if neg { &mut out.not_has } else { &mut out.has }).push(val.to_lowercase()),
+            k if fields.all.contains(k) => {
+                (if neg { &mut out.not_props } else { &mut out.props }).push((key.clone(), val.to_string()))
+            }
             _ => {
                 let text = if key.is_empty() { val.to_string() } else { format!("{key}:{val}") };
                 (if neg { &mut out.not_text } else { &mut out.text }).push(text);
@@ -182,6 +229,26 @@ pub fn build_sql(q: &Query, include_missing: bool) -> (String, Vec<Value>) {
         params.push(COLOR_MIN.into());
     }
 
+    let prop_sql = "EXISTS (SELECT 1 FROM asset_fields af JOIN fields f ON f.id = af.field_id \
+                    WHERE af.asset_id = a.id AND f.key = ?";
+    for (key, val) in q.props.iter().chain(&q.not_props) {
+        let positive = q.props.iter().any(|(k, v)| k == key && v == val);
+        // Number values are stored as REAL, so also compare against the parsed number.
+        let as_number: Value = val.parse::<f64>().map_or_else(|_| val.clone().into(), Value::from);
+        let sql = format!("{prop_sql} AND (af.value = ? COLLATE NOCASE OR af.value = ?))");
+        wh.push(if positive { sql } else { format!("NOT {sql}") });
+        params.extend([key.clone().into(), val.clone().into(), as_number]);
+    }
+    for (key, op, n) in &q.prop_cmps {
+        wh.push(format!("{prop_sql} AND f.kind = 'number' AND af.value {op} ?)"));
+        params.extend([key.clone().into(), (*n).into()]);
+    }
+    for (key, positive) in q.has.iter().map(|k| (k, true)).chain(q.not_has.iter().map(|k| (k, false))) {
+        let sql = format!("{prop_sql})");
+        wh.push(if positive { sql } else { format!("NOT {sql}") });
+        params.push(key.clone().into());
+    }
+
     if !include_missing && !q.flags.iter().any(|f| f == "missing") {
         wh.push("a.missing = 0".into());
     }
@@ -206,6 +273,21 @@ mod tests {
         assert_eq!(q.sources, [3]);
         assert_eq!(q.semantic, ["red dragon"]);
         assert_eq!(q.similar, None);
+    }
+
+    #[test]
+    fn parses_properties() {
+        let keys = FieldKeys {
+            all: ["size", "pack", "grid"].map(String::from).into(),
+            numeric: ["grid".to_string()].into(),
+        };
+        let q = parse_with(r#"size:Large -size:tiny pack:"Forgotten Adventures" grid>=70 w<300 has:view -has:pack foo:bar other>3"#, &keys);
+        assert_eq!(q.props, [("size".into(), "Large".into()), ("pack".into(), "Forgotten Adventures".into())]);
+        assert_eq!(q.not_props, [("size".to_string(), "tiny".to_string())]);
+        assert_eq!(q.prop_cmps, [("grid".to_string(), ">=".to_string(), 70.0)]);
+        assert_eq!(q.dims, [("width", "<".to_string(), 300)]);
+        assert_eq!((q.has, q.not_has), (vec!["view".to_string()], vec!["pack".to_string()]));
+        assert_eq!(q.text, ["foo:bar", "other>3"]);
     }
 
     #[test]

@@ -424,7 +424,8 @@ struct ListItem {
 }
 
 async fn list_assets(State(s): St, Query(p): Query<ListParams>) -> ApiResult {
-    let parsed = search::parse(&p.q);
+    let keys = s.tx(|c| Ok(search::FieldKeys::new(&properties::list_fields(c)?)))?;
+    let parsed = search::parse_with(&p.q, &keys);
     let (wh, mut params) = search::build_sql(&parsed, false);
     let mut order = search::order_by(&p.sort);
     let mut source = "assets a";
