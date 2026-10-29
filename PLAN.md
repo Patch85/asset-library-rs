@@ -128,3 +128,7 @@ clears `NSISDIR`. First build: 2026-10-28, 11.3 MiB, awaiting the user's test on
   is on, keeping the old vectors (tagged `embed_model ... (python)`) usable meanwhile.
 - 2026-10-28: The desktop app hosts the HTTP server in-process and reaches native features
   through HTTP endpoints (`Desktop` trait), so the page needs no Tauri IPC or capabilities.
+- 2026-10-28: Parity with the Python app is no longer a goal; it was reached at M6. `parity/`
+  becomes the Rust app's regression suite, the schema may diverge through migrations, and
+  importing Python libraries must keep working. `tools/diff_servers.py` and the golden
+  comparisons stay as records but may start to differ by design.

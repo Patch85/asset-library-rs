@@ -1,7 +1,8 @@
 # Asset Library (Rust port)
 
 A Rust + Tauri rewrite of the Python app in `../asset-library`, so friends can install it
-without Python. See `PLAN.md` for milestones and status.
+without Python. The port reached parity (M0–M6) and now evolves on its own. See `PLAN.md` for
+milestones and status.
 
 ## Ground rules
 
@@ -9,17 +10,18 @@ without Python. See `PLAN.md` for milestones and status.
   into it. Read its DB only by copying it first (see `tools/make_golden.py`). Run its server
   only through the parity harness, which points it at a temp data dir and sets
   `PYTHONDONTWRITEBYTECODE=1`.
-- **The parity suite in `parity/` is the spec.** A feature is ported when its parity tests pass
-  with `PARITY_IMPL=rust`. Change a test only if the Python original also passes the new
-  version, or if the change is a deliberate behavior change recorded in `PLAN.md`.
+- **Parity with the Python app is no longer a goal** (decided 2026-10-28). The suite in
+  `parity/` is now a regression suite for this app (`PARITY_IMPL=rust`); change its tests
+  freely when behavior changes on purpose, and record notable changes in `PLAN.md`. The
+  Python original no longer needs to pass them.
 - **Never commit real assets.** `fixtures/golden/` holds thumbnails from the user's purchased
   token packs and is gitignored. CI and committed tests use synthetic images only.
-- **Keep the on-disk format compatible** so an existing library imports as-is: SQLite schema
-  from `../asset-library/app/db.py`, thumbnails at `thumbs/<hash[:2]>/<hash>.webp`, SHA-1
-  content hashes, embeddings as little-endian f32 L2-normalized blobs. Schema changes go
-  through `PRAGMA user_version` migrations.
+- **Keep importing Python libraries working.** The schema may diverge from
+  `../asset-library/app/db.py`, but only through `PRAGMA user_version` migrations, which the
+  import (`import.rs`) runs on a restored Python database (user_version 0). Thumbnails stay at
+  `thumbs/<hash[:2]>/<hash>.webp`, hashes SHA-1, embeddings little-endian f32 L2-normalized.
 
-## Launch contract (both implementations)
+## Launch contract
 
 ```
 <server> --no-browser --port N      # serves http://127.0.0.1:N, API under /api
@@ -32,11 +34,10 @@ ASSET_LIBRARY_AI=0|1                # 0 = colours only
 
 ```bash
 parity/.venv/bin/python tools/fetch_onnxruntime.py     # once per checkout (add --platform win-x64 to cross-build)
-parity/.venv/bin/pytest parity                         # against the Python original
-PARITY_IMPL=rust parity/.venv/bin/pytest parity        # against target/debug/asset-library
+PARITY_IMPL=rust parity/.venv/bin/pytest parity        # regression suite against target/debug/asset-library
 cargo test --workspace                                 # unit tests + golden comparisons (if fixtures exist)
 parity/.venv/bin/python tools/make_golden.py           # regenerate fixtures/golden from ../asset-library
-parity/.venv/bin/python tools/diff_servers.py          # both servers on copies of the real library
+parity/.venv/bin/python tools/diff_servers.py          # historical: Python vs Rust on the real library
 cargo run -p asset-library-desktop                     # the Tauri app
 tools/build_windows.sh                                 # Windows NSIS installer, cross-built from WSL
 target/release/asset-library bench <folder>            # speed and memory on this machine
