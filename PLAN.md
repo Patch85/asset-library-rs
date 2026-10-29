@@ -11,17 +11,27 @@ Development happens in WSL; installers are built by GitHub Actions.
 
 ## Next up (resume here)
 
-M0 is done: all 17 parity tests pass against the Python original with no harness changes
-(`test_color_profile` needed no tolerance). `fixtures/golden/` holds 300 sampled assets,
-8 text queries and suggestions. System packages and `parity/.venv` are installed.
+M1 is done. `crates/asset-library` has the schema (`user_version` 1), scanner, sources,
+scan, asset list/get/patch and tag list endpoints. `PARITY_IMPL=rust` passes the 8 parity
+tests within M1's scope. The 9 that fail need M2 (thumbs, export), M3 (bulk, tag rename),
+M4 (colours, suggestions) or M5 (CLIP). The search query language (`search.rs`) was ported
+early, because the move/missing tests can only check their results through it.
 
-1. Start M1: Cargo workspace, schema, scanner.
+A rescan of a copy of the real library (6785 files, source path rewritten to `/mnt/c/...`)
+updated 0 files, so Rust's `mtime` matches what Python stored and imports aren't rehashed.
+
+1. Start M2: thumbnails at `thumbs/<hash[:2]>/<hash>.webp` (port `app/thumbs.py`),
+   the background pipeline (`jobs.py`), `/api/assets/{id}/thumb` and `/file`, zip and
+   folder export (`app/export.py`). Hook the pipeline into `AppState::start_scan` and
+   startup (the `TODO(M2)`s); `jobs::start` must set the warmer's `running` flag before it
+   returns (see `Scanner::scan_in_background`). Also replace the `thumbs` stub in
+   `scan_status`.
 
 ## Milestones
 
 - [x] **M0 Harness.** Black-box parity suite (`parity/`) passing against the Python original;
       golden fixtures from the real library (`tools/make_golden.py`).
-- [ ] **M1 Storage and scanning.** Identical schema, SHA-1 hashing, move/missing detection,
+- [x] **M1 Storage and scanning.** Identical schema, SHA-1 hashing, move/missing detection,
       folder tags, junk skipping, sources and scan-status API.
 - [ ] **M2 Thumbnails and files.** Lossy WebP thumbs, parallel warmer, file serving,
       zip and copy-to-folder export.
@@ -44,6 +54,12 @@ M0 is done: all 17 parity tests pass against the Python original with no harness
 
 - Colour fractions and CLIP vectors differ slightly from Pillow/fastembed-Python output. On
   first run the Rust app recomputes colours and embeddings for imported libraries.
+- Scan status stays `running` until all requested sources are scanned and the follow-up job
+  has started. The original briefly reports idle between sources and before thumbnailing.
+- File and folder names that aren't valid UTF-8 are skipped. The original aborted the
+  whole scan on them.
+- `/api/meta` reports `ai: false` until M5.
+- Stored `extra` JSON is compact (`{"a":1}`), not Python's `{"a": 1}`. Both parse the same.
 
 ## Decisions log
 
