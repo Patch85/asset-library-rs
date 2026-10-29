@@ -4,6 +4,7 @@ pub mod bench;
 pub mod clip;
 pub mod config;
 pub mod db;
+pub mod desktop;
 pub mod export;
 pub mod import;
 pub mod jobs;

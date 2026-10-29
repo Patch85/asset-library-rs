@@ -9,6 +9,7 @@ use crate::api::{self, AppState};
 use crate::clip::Clip;
 use crate::config::Config;
 use crate::db::Database;
+use crate::desktop::Desktop;
 use crate::jobs::Jobs;
 use crate::scanner::Scanner;
 use crate::settings::{Settings, SettingsStore};
@@ -20,6 +21,7 @@ pub struct Options {
     pub runtime_dir: Option<PathBuf>,
     /// Settings to use when `settings.json` doesn't exist yet.
     pub defaults: Settings,
+    pub desktop: Option<Arc<dyn Desktop>>,
 }
 
 /// Open the library and start the background pipeline.
@@ -41,6 +43,7 @@ pub fn open(cfg: &Config, opts: Options) -> anyhow::Result<Arc<AppState>> {
         db,
         scanner,
         jobs,
+        desktop: opts.desktop,
         data_dir: cfg.data_dir.clone(),
         model_dir: cfg.model_dir.clone(),
     }))

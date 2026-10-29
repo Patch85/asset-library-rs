@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 
 use crate::config::{ASSET_TYPES, COLOR_HEX};
 use crate::db::{Database, get_or_create_tags, marks, normalize_tag, reindex_fts};
+use crate::desktop::{Desktop, drag_icon};
 use crate::export;
 use crate::settings::Settings;
 use crate::jobs::Jobs;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub scanner: Arc<Scanner>,
     pub jobs: Arc<Jobs>,
+    pub desktop: Option<Arc<dyn Desktop>>,
     pub data_dir: PathBuf,
     pub model_dir: PathBuf,
 }
@@ -55,6 +57,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/suggestions/ignored/{tag}", axum::routing::delete(unignore_suggestion))
         .route("/api/tags", get(list_tags))
         .route("/api/settings", get(get_settings).patch(update_settings))
+        .route("/api/pick-folder", post(pick_folder))
+        .route("/api/drag", post(start_drag))
         .route("/api/import", post(import_library))
         .route("/api/tags/{name}", patch(rename_tag).delete(delete_tag))
         .fallback(get(static_file))
@@ -81,6 +85,19 @@ impl AppState {
     /// Run a database transaction from an async handler.
     fn tx<T>(&self, f: impl FnOnce(&Connection) -> Result<T, ApiError>) -> Result<T, ApiError> {
         tokio::task::block_in_place(|| self.db.tx(|c| f(c)))
+    }
+
+    /// Rescan every source; false if a scan is already running.
+    pub fn rescan_all(&self) -> bool {
+        let ids = self
+            .db
+            .tx(|c| {
+                let mut stmt = c.prepare("SELECT id FROM sources")?;
+                let ids = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>();
+                ids
+            })
+            .unwrap_or_default();
+        self.start_scan(ids)
     }
 
     fn start_scan(&self, ids: Vec<i64>) -> bool {
@@ -205,6 +222,7 @@ async fn meta(State(s): St) -> Json<Value> {
         "sorts": search::SORTS.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
         "colors": colors,
         "ai": s.jobs.analysis.ai_available(),
+        "desktop": s.desktop.is_some(),
     }))
 }
 
@@ -914,7 +932,7 @@ async fn export_zip(State(s): St, Json(body): Json<ExportIn>) -> ApiResult<Respo
         .into_response())
 }
 
-// ---------------------------------------------------------------- settings and import
+// ---------------------------------------------------------------- desktop and settings
 
 async fn get_settings(State(s): St) -> ApiResult {
     let mut v = serde_json::to_value(s.jobs.settings.get()).unwrap_or_default();
@@ -942,6 +960,47 @@ async fn update_settings(State(s): St, Json(patch): Json<Map<String, Value>>) ->
         s.jobs.start(); // embed everything, downloading the model if needed
     }
     get_settings(State(s)).await
+}
+
+/// Open a native folder picker on this machine (desktop app only).
+async fn pick_folder(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>) -> ApiResult {
+    local_only(addr)?;
+    let Some(desktop) = s.desktop.clone() else { return Ok(Json(json!({ "path": "" }))) };
+    let picked = tokio::task::spawn_blocking(move || desktop.pick_folder()).await.ok().flatten();
+    Ok(Json(json!({ "path": picked.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default() })))
+}
+
+#[derive(Deserialize)]
+struct DragIn {
+    ids: Vec<i64>,
+}
+
+/// Start a native drag of the assets' original files (desktop app only).
+async fn start_drag(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Json(body): Json<DragIn>) -> ApiResult {
+    local_only(addr)?;
+    let Some(desktop) = s.desktop.clone() else {
+        return Err(err(StatusCode::BAD_REQUEST, "Native drag needs the desktop app"));
+    };
+    let mut files = Vec::new();
+    let mut icon = None;
+    for &id in &body.ids {
+        let row = s.tx(|c| asset_row(c, id))?;
+        let path = full_path(&row);
+        if path.exists() {
+            if icon.is_none() {
+                let hash = row["file_hash"].as_str().unwrap_or_default();
+                icon = drag_icon(&s.jobs.thumbs.path(hash)).ok();
+            }
+            files.push(path);
+        }
+    }
+    if files.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "None of the selected files exist on disk"));
+    }
+    desktop
+        .start_drag(files, icon.unwrap_or_default())
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    ok()
 }
 
 #[derive(Deserialize)]
