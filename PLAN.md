@@ -11,7 +11,8 @@ Development happens in WSL; installers are built by GitHub Actions.
 
 ## Next up (resume here)
 
-M7 is built and waiting for the user to test it (see "Testing M7" below); then start M8.
+Building M8 (properties), designed below. M7 is installed on the user's Windows machine and
+being tested there; fix what they report as it comes.
 M0–M6 are done: all 17 parity tests pass with `PARITY_IMPL=rust`, `tools/diff_servers.py`
 finds 245/245 deterministic responses identical on the real library, and `cargo test` runs
 the golden comparisons when `fixtures/golden/` and `models/` are present.
@@ -72,6 +73,28 @@ clears `NSISDIR`. First build: 2026-10-28, 11.3 MiB, awaiting the user's test on
   batch 64 with 21 threads, 24/s with 2 threads; peak RSS 0.7–1.4 GB (includes the bench
   holding every decoded image).
 
+## M8 design: properties
+
+Tags stay an open vocabulary for what the subject is. Properties are per-type fields with
+one value each, for how the asset is made or used (the real library hides creature size in
+2700 filenames, and pack names like `fa_tokens` live in tags).
+
+- Schema (migration 2): `fields(id, asset_type, key, label, kind, options, position)` with
+  kind `choice` (options = JSON list), `number` or `text`; `asset_fields(asset_id, field_id,
+  value)`, numbers stored as REAL so comparisons work. Seeded defaults: token view
+  (top-down/portrait/isometric/side), size (tiny…gargantuan), pack (text); map grid
+  (number, px per square), variant (day/night/dawn/dusk/rain/snow/fog), pack (text).
+- Editable: add/rename/reorder/delete fields; add/rename/remove choice options (renames
+  update values, removals clear them). Keys can't be reserved query words.
+- Values: asset GET/PATCH `fields: {key: value|null}`; bulk `set_fields`. Changing an
+  asset's type moves values to same-key fields of the new type and drops the rest.
+- Search: `size:large`, `-size:large`, `pack:"forgotten adventures"`, `grid>=70`,
+  `has:size` / `-has:size`. Sidebar sections with value counts (`/api/facets`).
+- Suggestions alongside tag suggestions: filename words matching a choice option; majority
+  value among assets with the same source and pixel size; look-alike votes (CLIP
+  neighbours); majority among files in the same folder (pack).
+- "Move tag to property": set a field value on every asset with the tag, then drop the tag.
+
 ## Milestones
 
 - [x] **M0 Harness.** Black-box parity suite (`parity/`) passing against the Python original;
@@ -92,7 +115,9 @@ clears `NSISDIR`. First build: 2026-10-28, 11.3 MiB, awaiting the user's test on
       native drag-out, tray, single instance, settings (AI opt-in with model download, CPU
       thread cap, below-normal priority, pause on battery, batch size), import of an existing
       Python library.
-- [ ] **M8 Release.** tauri-action matrix (Win/macOS/Linux), updater signing key, GitHub
+- [ ] **M8 Properties.** Editable per-type fields with search, facets, bulk edit, suggestions
+      and tag-to-property moves (design above).
+- [ ] **M9 Release.** tauri-action matrix (Win/macOS/Linux), updater signing key, GitHub
       Releases, in-app "new version" prompt.
 
 ## Known, accepted differences
@@ -132,3 +157,4 @@ clears `NSISDIR`. First build: 2026-10-28, 11.3 MiB, awaiting the user's test on
   becomes the Rust app's regression suite, the schema may diverge through migrations, and
   importing Python libraries must keep working. `tools/diff_servers.py` and the golden
   comparisons stay as records but may start to differ by design.
+- 2026-10-28: Properties (M8) come before the release, with user-editable field definitions.
