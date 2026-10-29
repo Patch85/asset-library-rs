@@ -400,12 +400,19 @@ const SKIP_DIRS: &[&str] = &["__macosx", "$recycle.bin", "system volume informat
 /// symlinked folders are not followed. Names that aren't valid UTF-8 are skipped, since the
 /// database stores paths as text.
 pub fn iter_images(root: &Path) -> Vec<(PathBuf, String)> {
-    let mut out = Vec::new();
-    walk(root, "", &mut out);
-    out
+    iter_files(root).0
 }
 
-fn walk(dir: &Path, rel_dir: &str, out: &mut Vec<(PathBuf, String)>) {
+type Found = Vec<(PathBuf, String)>;
+
+/// Image files and Dungeondraft packs under `root`, walked like `iter_images`.
+pub fn iter_files(root: &Path) -> (Found, Found) {
+    let (mut images, mut packs) = (Vec::new(), Vec::new());
+    walk(root, "", &mut images, &mut packs);
+    (images, packs)
+}
+
+fn walk(dir: &Path, rel_dir: &str, images: &mut Found, packs: &mut Found) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     let mut subdirs = Vec::new();
     for entry in entries.flatten() {
@@ -425,12 +432,14 @@ fn walk(dir: &Path, rel_dir: &str, out: &mut Vec<(PathBuf, String)>) {
             continue;
         }
         let ext = Path::new(name).extension().and_then(|e| e.to_str()).map(str::to_lowercase);
-        if ext.is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str())) {
-            out.push((path, rel));
+        match ext.as_deref() {
+            Some(e) if IMAGE_EXTENSIONS.contains(&e) => images.push((path, rel)),
+            Some(e) if e == crate::ddpack::EXTENSION => packs.push((path, rel)),
+            _ => {}
         }
     }
     for (path, rel) in subdirs {
-        walk(&path, &rel, out);
+        walk(&path, &rel, images, packs);
     }
 }
 
