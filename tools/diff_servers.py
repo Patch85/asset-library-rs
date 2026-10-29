@@ -32,6 +32,9 @@ ORIGINAL = Path(os.environ.get("ASSET_LIBRARY_ORIGINAL", ROOT.parent / "asset-li
 GOLDEN_DB = ROOT / "fixtures" / "golden" / "library.db"
 MODELS = ROOT / "models"
 
+# Fields the port adds on purpose (see PLAN.md, "Known, accepted differences").
+EXTENSIONS = {".desktop"}
+
 TEXT_QUERIES = ["a red dragon", "skeleton warrior with a sword", "wolf", "a treasure chest",
                 "elf archer", "humanoid with an octopus head and face tentacles"]
 
@@ -120,6 +123,8 @@ def diff(a, b, path="") -> list[str]:
     if isinstance(a, dict):
         out = []
         for k in sorted(set(a) | set(b)):
+            if k not in a and f"{path}.{k}" in EXTENSIONS:
+                continue
             if k not in a or k not in b:
                 out.append(f"{path}.{k}: only in {'rust' if k in b else 'python'}")
             else:
