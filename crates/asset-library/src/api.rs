@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 
 use crate::config::{ASSET_TYPES, COLOR_HEX};
 use crate::db::{Database, get_or_create_tags, marks, reindex_fts};
+use crate::export;
 use crate::jobs::Jobs;
 use crate::scanner::{Scanner, join_rel};
 use crate::search;
@@ -41,6 +42,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/assets/{id}/thumb", get(thumb))
         .route("/api/assets/{id}/file", get(original))
         .route("/api/assets/{id}/reveal", post(reveal))
+        .route("/api/export/folder", post(export_folder))
+        .route("/api/export/zip", post(export_zip))
         .route("/api/tags", get(list_tags))
         .with_state(state)
 }
@@ -604,4 +607,59 @@ async fn reveal(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Path(i
     let path = full_path(&s.tx(|c| asset_row(c, id))?);
     reveal_in_file_manager(&path).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     ok()
+}
+
+// ---------------------------------------------------------------- export
+
+#[derive(Deserialize)]
+struct ExportIn {
+    ids: Vec<i64>,
+    dest: Option<String>,
+    #[serde(default = "yes")]
+    flatten: bool,
+}
+
+fn export_items(s: &AppState, ids: &[i64]) -> ApiResult<Vec<export::Item>> {
+    let mut items = Vec::new();
+    for &id in ids {
+        let row = s.tx(|c| asset_row(c, id))?;
+        let full_path = full_path(&row);
+        if full_path.exists() {
+            let text = |k: &str| row[k].as_str().unwrap_or_default().to_string();
+            items.push(export::Item { rel_path: text("rel_path"), source_name: text("source_name"), full_path });
+        }
+    }
+    if items.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "None of the selected files exist on disk"));
+    }
+    Ok(items)
+}
+
+async fn export_folder(
+    State(s): St,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<ExportIn>,
+) -> ApiResult {
+    local_only(addr)?;
+    let Some(dest) = body.dest.filter(|d| !d.is_empty()) else {
+        return Err(err(StatusCode::BAD_REQUEST, "Destination folder required"));
+    };
+    let items = export_items(&s, &body.ids)?;
+    let written = tokio::task::block_in_place(|| export::copy_to_folder(&items, &expand_user(&dest), body.flatten))
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(json!({ "count": written.len(), "dest": dest })))
+}
+
+async fn export_zip(State(s): St, Json(body): Json<ExportIn>) -> ApiResult<Response> {
+    let items = export_items(&s, &body.ids)?;
+    let data = tokio::task::block_in_place(|| export::build_zip(&items, body.flatten))
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip"),
+            (header::CONTENT_DISPOSITION, "attachment; filename=\"assets.zip\""),
+        ],
+        data,
+    )
+        .into_response())
 }
