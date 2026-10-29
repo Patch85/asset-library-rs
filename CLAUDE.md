@@ -31,7 +31,15 @@ ASSET_LIBRARY_AI=0|1                # 0 = colours only
 ## Commands
 
 ```bash
+parity/.venv/bin/python tools/fetch_onnxruntime.py     # once per checkout: ONNX Runtime into vendor/
 parity/.venv/bin/pytest parity                         # against the Python original
 PARITY_IMPL=rust parity/.venv/bin/pytest parity        # against target/debug/asset-library
+cargo test --workspace                                 # unit tests + golden comparisons (if fixtures exist)
 parity/.venv/bin/python tools/make_golden.py           # regenerate fixtures/golden from ../asset-library
+parity/.venv/bin/python tools/diff_servers.py          # both servers on copies of the real library
+cargo run -p asset-library-desktop                     # the Tauri app
+target/release/asset-library bench <folder>            # speed and memory on this machine
 ```
+
+Release builds load ONNX Runtime from next to the executable (or `ORT_DYLIB_PATH`); copy
+`vendor/onnxruntime/lib/*` there before running `target/release/asset-library` with AI on.
