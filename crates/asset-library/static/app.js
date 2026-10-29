@@ -8,6 +8,7 @@ const state = {
   items: [], total: 0, loading: false, done: false, gen: 0,
   selected: new Set(), anchor: null,
   tags: [], sources: [], meta: { asset_types: [], sorts: [] },
+  fields: [], facets: [],
 };
 
 // ------------------------------------------------------------------ utils
@@ -106,6 +107,12 @@ function toggleFilter(key, value, tristate = false) {
   setQuery(rest.join(" "));
 }
 
+/** Add or remove one exact query token. */
+function toggleToken(tok) {
+  const toks = tokens(state.q);
+  setQuery((toks.includes(tok) ? toks.filter((t) => t !== tok) : [...toks, tok]).join(" "));
+}
+
 function filterState(key, value) {
   const pos = `${key}:${quoteVal(value)}`;
   const toks = tokens(state.q);
@@ -136,6 +143,25 @@ function renderSidebar() {
          <span class="label">${esc(s.name)}</span><span class="n">${s.count}</span></li>`).join("")
     : `<li class="muted" id="no-sources">Add a folder to begin</li>`;
 
+  const withValues = state.facets.filter((fc) => fc.values.length);
+  $("#props").innerHTML = withValues.map((fc) => `
+    <ul class="nav"><li class="group">${esc(fc.label)}</li>${fc.values.map((v) => {
+      const st = filterState(fc.key, String(v.value));
+      return `<li class="sub ${st === "on" ? "active" : st === "off" ? "excluded" : ""}" data-pkey="${esc(fc.key)}"
+                data-pval="${esc(v.value)}" title="Click: include, again: exclude, again: clear">
+                <span class="label">${esc(v.value)}</span><span class="n">${v.count}</span></li>`;
+    }).join("")}
+      <li class="sub ${tokens(state.q).includes(`-has:${fc.key}`) ? "active" : ""}" data-phas="${esc(fc.key)}"
+          title="Assets of this kind without a ${esc(fc.label)}"><span class="label muted">not set</span></li></ul>`).join("")
+    || '<p class="muted small">None set yet. Select assets to set them, or ✎ to edit.</p>';
+
+  document.querySelectorAll("datalist.fv").forEach((d) => d.remove());
+  for (const fc of state.facets.filter((x) => x.kind === "text")) {
+    const d = Object.assign(document.createElement("datalist"), { id: `fv-${fc.key}`, className: "fv" });
+    d.innerHTML = fc.values.map((v) => `<option value="${esc(v.value)}">`).join("");
+    document.body.append(d);
+  }
+
   const f = $("#tag-filter").value.trim().toLowerCase();
   $("#tags").innerHTML = state.tags
     .filter((t) => !f || t.name.includes(f))
@@ -154,7 +180,8 @@ function renderSidebar() {
 }
 
 async function refreshSidebar() {
-  [state.tags, state.sources] = await Promise.all([api("/api/tags"), api("/api/sources")]);
+  [state.tags, state.sources, state.facets] =
+    await Promise.all([api("/api/tags"), api("/api/sources"), api("/api/facets")]);
   renderSidebar();
 }
 
@@ -299,6 +326,44 @@ async function renderDetail() {
   }
 }
 
+// ------------------------------------------------------------------ properties
+
+const fieldsFor = (type) => state.fields.filter((f) => f.asset_type === type);
+
+/** One definition per key across `types`, in field order. */
+function fieldsForTypes(types) {
+  const out = [];
+  for (const f of state.fields.filter((x) => types.includes(x.asset_type)))
+    if (!out.some((o) => o.key === f.key)) out.push(f);
+  return out.sort((a, b) => a.position - b.position);
+}
+
+/** Inputs for property values. With `multi`, empty means "leave as is" and keys in `mixed`
+ *  show "(mixed)"; a choice can be cleared with its "clear" option. */
+function fieldControls(fields, values, { multi = false, mixed = new Set() } = {}) {
+  if (!fields.length) return "";
+  return `<div class="props-grid">${fields.map((f) => {
+    const v = values[f.key];
+    const ph = mixed.has(f.key) ? "(mixed)" : "—";
+    const input = f.kind === "choice"
+      ? `<select data-field="${esc(f.key)}"><option value="">${ph}</option>${f.options.map((o) =>
+          `<option ${v !== undefined && String(v).toLowerCase() === o.toLowerCase() ? "selected" : ""}>${esc(o)}</option>`).join("")}
+         ${multi ? '<option value="__clear">clear</option>' : ""}</select>`
+      : `<input data-field="${esc(f.key)}" ${f.kind === "number" ? 'type="number" step="any"' : `list="fv-${esc(f.key)}"`}
+           value="${v === undefined ? "" : esc(v)}" placeholder="${ph}" autocomplete="off">`;
+    return `<span>${esc(f.label)}</span>${input}`;
+  }).join("")}</div>`;
+}
+
+function bindFieldControls(root, multi, onChange) {
+  root.querySelectorAll("[data-field]").forEach((el) => el.addEventListener("change", () => {
+    const raw = el.value.trim();
+    if (raw === "__clear") return onChange(el.dataset.field, null);
+    if (raw === "" && multi) return;
+    onChange(el.dataset.field, raw === "" ? null : el.type === "number" ? Number(raw) : raw);
+  }));
+}
+
 function typeOptions(current, placeholder) {
   return (placeholder ? `<option value="">${placeholder}</option>` : "") +
     state.meta.asset_types.map((t) => `<option ${t === current ? "selected" : ""}>${esc(t)}</option>`).join("");
@@ -315,6 +380,7 @@ function renderSingle(a) {
     </label>
     <div id="suggestions"></div>
     <label>Type <select id="d-type">${typeOptions(a.asset_type)}</select></label>
+    ${fieldControls(fieldsFor(a.asset_type), a.fields)}
     ${Object.keys(a.colors).length ? `<div class="colors-row">${Object.entries(a.colors).slice(0, 5).map(([c, f]) =>
       `<button class="swatch" data-color="${c}" style="--c:${state.meta.colors[c]}"
          title="${c} ${Math.round(f * 100)}% · click to find more ${c}"></button>`).join("")}</div>` : ""}
@@ -339,17 +405,22 @@ function renderSingle(a) {
       if (idx >= 0) {
         Object.assign(state.items[idx], {
           name: updated.name, tags: updated.tags, favorite: updated.favorite, asset_type: updated.asset_type,
+          fields: updated.fields,
         });
         rerenderCard(idx);
       }
-      if (patch.tags) refreshSidebar();
+      if (patch.tags || patch.fields || patch.asset_type) refreshSidebar();
       return updated;
     } catch (e) { toast(e.message, true); }
   };
 
   $("#d-name").addEventListener("change", (e) => save({ name: e.target.value }));
   $("#d-notes").addEventListener("change", (e) => save({ notes: e.target.value }));
-  $("#d-type").addEventListener("change", (e) => save({ asset_type: e.target.value }));
+  $("#d-type").addEventListener("change", async (e) => renderSingle(await save({ asset_type: e.target.value })));
+  bindFieldControls(panel, false, async (key, value) => {
+    const updated = await save({ fields: { [key]: value } });
+    if (updated) renderSingle(updated);
+  });
   $("#d-fav").addEventListener("click", async () => renderSingle(await save({ favorite: !a.favorite })));
   $("#d-reveal").addEventListener("click", () => api(`/api/assets/${a.id}/reveal`, { method: "POST" }));
   $("#d-open").addEventListener("click", () => openOriginal(a.id));
@@ -372,6 +443,13 @@ function renderMulti(sel) {
   for (const it of sel) for (const t of it.tags) counts.set(t, (counts.get(t) || 0) + 1);
   const tags = [...counts].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]));
   const allFav = sel.every((it) => it.favorite);
+  const fields = fieldsForTypes([...new Set(sel.map((it) => it.asset_type))]);
+  const common = {}, mixed = new Set();
+  for (const f of fields) {
+    const vals = new Set(sel.map((it) => JSON.stringify(it.fields?.[f.key] ?? null)));
+    if (vals.size === 1) { const v = JSON.parse([...vals][0]); if (v !== null) common[f.key] = v; }
+    else mixed.add(f.key);
+  }
 
   $("#detail").innerHTML = `
     <h2>${sel.length} selected</h2>
@@ -383,6 +461,7 @@ function renderMulti(sel) {
     </label>
     <div id="suggestions"></div>
     <label>Type <select id="m-type">${typeOptions(null, "Set type…")}</select></label>
+    ${fieldControls(fields, common, { multi: true, mixed })}
     <div class="actions">
       <button id="m-fav">${allFav ? "Unfavorite all" : "★ Favorite all"}</button>
       <button id="m-export" class="primary">Export ${sel.length}…</button>
@@ -390,6 +469,7 @@ function renderMulti(sel) {
     </div>`;
 
   $("#m-type").addEventListener("change", (e) => e.target.value && bulk({ asset_type: e.target.value }));
+  bindFieldControls($("#detail"), true, (key, value) => bulk({ set_fields: { [key]: value } }));
   $("#m-fav").addEventListener("click", () => bulk({ favorite: !allFav }));
   $("#m-export").addEventListener("click", openExport);
   $("#m-clear").addEventListener("click", () => { state.selected.clear(); syncSelectionClasses(); });
@@ -412,11 +492,12 @@ async function renderSuggestions(ids) {
   if (!list.length) { box.innerHTML = ""; return; }
   const multi = ids.length > 1;
   box.innerHTML = `
-    <label>Suggested tags <span class="muted">click to add · × to dismiss</span></label>
+    <label>Suggestions <span class="muted">click to add · × to dismiss</span></label>
     <div class="chips">${list.map((s, i) => `
       <span class="chip suggest" title="${esc(s.source)} · ${Math.round(s.score * 100)}% confident${
         multi ? ` · applies to ${s.count} of ${ids.length}` : ""}" style="--conf:${0.45 + s.score * 0.55}">
-        <button data-accept="${i}">+ ${esc(s.tag)}</button>${multi ? `<span class="n">${s.count}</span>` : ""}
+        <button data-accept="${i}">+ ${s.field ? `${esc(s.label)}: ${esc(s.value)}` : esc(s.tag)}</button>${
+          multi ? `<span class="n">${s.count}</span>` : ""}
         <button data-dismiss="${i}" title="Dismiss">×</button></span>`).join("")}</div>
     <div class="actions small-actions">
       <button id="s-accept-all" class="ghost small">Add all ${list.length}</button>
@@ -424,7 +505,9 @@ async function renderSuggestions(ids) {
     </div>`;
 
   const accept = async (items) => {
-    for (const s of items) await bulk({ add_tags: [s.tag] }, s.ids, false);
+    for (const s of items) {
+      await bulk(s.field ? { set_fields: { [s.field]: s.value } } : { add_tags: [s.tag] }, s.ids, false);
+    }
     refreshSidebar();
     renderDetail();
   };
@@ -434,10 +517,11 @@ async function renderSuggestions(ids) {
     const s = list[+b.dataset.dismiss];
     await api("/api/suggestions/reject", { method: "POST", body: { ids: s.ids, tag: s.tag } });
     renderSuggestions(ids);
-    toast(`Dismissed "${s.tag}"`, false, {
+    const what = s.field ? `${s.label}: ${s.value}` : s.tag;
+    toast(`Dismissed "${what}"`, false, {
       label: "Never suggest it", run: async () => {
         await api("/api/suggestions/reject", { method: "POST", body: { tag: s.tag, everywhere: true } });
-        toast(`"${s.tag}" won't be suggested again`);
+        toast(`"${what}" won't be suggested again`);
       },
     });
   }));
@@ -471,6 +555,13 @@ async function bulk(patch, ids = [...state.selected], refresh = true) {
     if (patch.add_tags) it.tags = [...new Set([...it.tags, ...patch.add_tags.map(normTag)])].sort();
     if (patch.remove_tags) it.tags = it.tags.filter((t) => !patch.remove_tags.includes(t));
     if (patch.asset_type) it.asset_type = patch.asset_type;
+    if (patch.set_fields || patch.asset_type) {
+      const keys = new Set(fieldsFor(it.asset_type).map((f) => f.key));
+      const next = Object.fromEntries(Object.entries(it.fields || {}).filter(([k]) => keys.has(k)));
+      for (const [k, v] of Object.entries(patch.set_fields || {}))
+        if (keys.has(k)) v === null ? delete next[k] : next[k] = v;
+      it.fields = next;
+    }
     if (patch.favorite !== undefined) it.favorite = patch.favorite;
     rerenderCard(idx);
   });
@@ -499,6 +590,83 @@ function bindTagInput(onAdd) {
 function openOriginal(id) {
   if (state.meta.desktop) api(`/api/assets/${id}/open`, { method: "POST" }).catch((e) => toast(e.message, true));
   else window.open(`/api/assets/${id}/file`, "_blank");
+}
+
+// ------------------------------------------------------------------ properties editor
+
+async function openPropsEditor() {
+  const dlg = $("#props-dialog");
+  const f = $("form", dlg);
+  f.ptype.innerHTML = typeOptions(f.ptype.value || "token");
+  await renderPropsList();
+  dlg.showModal();
+}
+
+async function renderPropsList() {
+  state.fields = await api("/api/fields");
+  const type = $("#props-dialog form").ptype.value;
+  const list = fieldsFor(type);
+  const box = $("#props-list");
+  box.innerHTML = list.map((fd, i) => `
+    <div class="prop-row" data-id="${fd.id}">
+      <input data-label value="${esc(fd.label)}" title="Name">
+      <input data-key value="${esc(fd.key)}" title="Search with ${esc(fd.key)}:value">
+      <div class="btns"><span class="kind">${fd.kind}</span>
+        <button type="button" data-move="-1" ${i === 0 ? "disabled" : ""} title="Move up">↑</button>
+        <button type="button" data-move="1" ${i === list.length - 1 ? "disabled" : ""} title="Move down">↓</button>
+        <button type="button" data-del class="danger" title="Delete property">×</button></div>
+      ${fd.kind === "choice" ? `<div class="opts">${fd.options.map((o) =>
+        `<span class="chip"><button type="button" data-ren="${esc(o)}" title="Rename (merges into an existing choice)">${esc(o)}</button>` +
+        `<button type="button" data-rmopt="${esc(o)}" title="Remove">×</button></span>`).join("")}
+        <input data-addopt placeholder="Add choice…"></div>` : ""}
+    </div>`).join("") || '<p class="muted">No properties for this type yet.</p>';
+
+  const patch = async (id, body) => {
+    try { await api(`/api/fields/${id}`, { method: "PATCH", body }); }
+    catch (e) { toast(e.message, true); }
+    renderPropsList();
+  };
+  box.querySelectorAll(".prop-row").forEach((row, i) => {
+    const id = +row.dataset.id, fd = list[i];
+    // Enter would submit the dialog's form; commit the field instead.
+    row.querySelectorAll("input").forEach((inp) => inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+    }));
+    $("[data-label]", row).addEventListener("change", (e) => patch(id, { label: e.target.value }));
+    $("[data-key]", row).addEventListener("change", (e) => patch(id, { key: e.target.value }));
+    row.querySelectorAll("[data-move]").forEach((b) =>
+      b.addEventListener("click", () => patch(id, { position: i + +b.dataset.move })));
+    $("[data-del]", row).addEventListener("click", async () => {
+      if (!await ask({ title: `Delete "${fd.label}"?`, ok: "Delete", danger: true,
+        message: `Its value is removed from every ${type}.` })) return;
+      await api(`/api/fields/${id}`, { method: "DELETE" });
+      renderPropsList();
+    });
+    row.querySelectorAll("[data-ren]").forEach((b) => b.addEventListener("click", async () => {
+      const to = await ask({ title: `Rename "${b.dataset.ren}"`, input: true, value: b.dataset.ren, ok: "Rename",
+        message: "Assets with it are updated. An existing choice's name merges them." });
+      if (to && to !== b.dataset.ren) patch(id, { rename_value: { from: b.dataset.ren, to } });
+    }));
+    row.querySelectorAll("[data-rmopt]").forEach((b) => b.addEventListener("click", async () => {
+      if (await ask({ title: `Remove "${b.dataset.rmopt}"?`, ok: "Remove", danger: true,
+        message: "It's cleared from every asset that has it." })) patch(id, { remove_option: b.dataset.rmopt });
+    }));
+    $("[data-addopt]", row)?.addEventListener("change", (e) => e.target.value.trim() && patch(id, { add_option: e.target.value }));
+  });
+}
+
+async function addProperty() {
+  const f = $("#props-dialog form");
+  const label = f.new_label.value.trim();
+  if (!label) return toast("Give the property a name", true);
+  try {
+    await api("/api/fields", { method: "POST", body: {
+      asset_type: f.ptype.value, key: label, label, kind: f.new_kind.value,
+      options: f.new_options.value.split(",").map((o) => o.trim()).filter(Boolean),
+    } });
+    f.new_label.value = f.new_options.value = "";
+    renderPropsList();
+  } catch (e) { toast(e.message, true); }
 }
 
 // ------------------------------------------------------------------ dialogs
@@ -622,20 +790,53 @@ async function onTagContext(e) {
   const li = e.target.closest("[data-tag]");
   if (!li) return;
   e.preventDefault();
-  const name = li.dataset.tag;
-  const next = await ask({ title: `Rename tag "${name}"`, input: true, value: name, ok: "Rename",
-    message: "An existing name merges them. Leave empty to delete it from all assets." });
-  if (next === null || next === name) return;
-  try {
-    if (next.trim() === "") {
-      if (!await ask({ title: `Delete tag "${name}" from every asset?`, ok: "Delete", danger: true })) return;
-      await api(`/api/tags/${encodeURIComponent(name)}`, { method: "DELETE" });
-    } else {
-      await api(`/api/tags/${encodeURIComponent(name)}`, { method: "PATCH", body: { new_name: next } });
-    }
-    await refreshSidebar();
-    reload();
-  } catch (err) { toast(err.message, true); }
+  openTagDialog(li.dataset.tag);
+}
+
+/** Rename/merge, move to a property, or delete a tag. */
+function openTagDialog(name) {
+  const dlg = $("#tag-dialog");
+  const f = $("form", dlg);
+  $(".name", dlg).textContent = name;
+  f.new_name.value = name;
+  const keys = fieldsForTypes(state.meta.asset_types);
+  f.field.innerHTML = keys.map((k) => `<option value="${esc(k.key)}">${esc(k.label)}</option>`).join("");
+  const slot = $(".value-slot", dlg);
+  const renderValue = () => {
+    const k = keys.find((x) => x.key === f.field.value);
+    if (!k) { slot.innerHTML = ""; return; }
+    // Merge choices across types that share the key.
+    const opts = [...new Set(state.fields.filter((x) => x.key === k.key).flatMap((x) => x.options))];
+    slot.innerHTML = k.kind === "choice"
+      ? `<select name="pvalue">${opts.map((o) =>
+          `<option ${o.toLowerCase() === name.toLowerCase() ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`
+      : `<input name="pvalue" ${k.kind === "number" ? 'type="number" step="any"' : `list="fv-${esc(k.key)}"`}
+           value="${k.kind === "number" ? "" : esc(name)}" autocomplete="off">`;
+  };
+  f.field.onchange = renderValue;
+  renderValue();
+  dlg.addEventListener("close", async () => {
+    const enc = encodeURIComponent(name);
+    try {
+      if (dlg.returnValue === "rename") {
+        const next = f.new_name.value.trim();
+        if (!next || next === name) return;
+        await api(`/api/tags/${enc}`, { method: "PATCH", body: { new_name: next } });
+      } else if (dlg.returnValue === "move") {
+        const value = f.pvalue?.value.trim();
+        if (!value) return toast("Choose a value", true);
+        const r = await api(`/api/tags/${enc}/promote`, { method: "POST", body: { field: f.field.value, value } });
+        toast(`Moved ${r.moved} asset${r.moved === 1 ? "" : "s"}` +
+              (r.skipped ? ` (${r.skipped} kept the tag: their type has no such property)` : ""));
+      } else if (dlg.returnValue === "delete") {
+        if (!await ask({ title: `Delete tag "${name}" from every asset?`, ok: "Delete", danger: true })) return;
+        await api(`/api/tags/${enc}`, { method: "DELETE" });
+      } else return;
+      await refreshSidebar();
+      reload();
+    } catch (err) { toast(err.message, true); }
+  }, { once: true });
+  dlg.showModal();
 }
 
 async function onSourceContext(e) {
@@ -772,6 +973,19 @@ function bindEvents() {
     if (b) toggleFilter("color", b.dataset.color, true);
   });
   $("#tag-filter").addEventListener("input", renderSidebar);
+  $("#props").addEventListener("click", (e) => {
+    const v = e.target.closest("[data-pkey]");
+    if (v) return toggleFilter(v.dataset.pkey, v.dataset.pval, true);
+    const h = e.target.closest("[data-phas]");
+    if (h) toggleToken(`-has:${h.dataset.phas}`);
+  });
+  $("#edit-props").addEventListener("click", openPropsEditor);
+  $("#add-prop").addEventListener("click", addProperty);
+  $("#props-dialog form").ptype.addEventListener("change", renderPropsList);
+  ["new_label", "new_options"].forEach((n) => $("#props-dialog form")[n].addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addProperty(); }
+  }));
+  $("#props-dialog").addEventListener("close", async () => { await refreshSidebar(); renderDetail(); });
 
   $("#add-source").addEventListener("click", openSourceDialog);
   $("#main").addEventListener("click", (e) => { if (e.target.id === "empty-add") openSourceDialog(); });
@@ -810,7 +1024,7 @@ function bindEvents() {
 }
 
 async function init() {
-  state.meta = await api("/api/meta");
+  [state.meta, state.fields] = await Promise.all([api("/api/meta"), api("/api/fields")]);
   // ?q= in the URL (e.g. a bookmarked search) wins over the remembered search.
   state.q = new URLSearchParams(location.search).get("q") ?? store.get("q", "");
   state.sort = store.get("sort", "name");

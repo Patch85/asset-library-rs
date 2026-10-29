@@ -154,6 +154,20 @@ dialog label { display: flex; flex-direction: column; gap: 4px; }
 dialog label.check { flex-direction: row; align-items: center; gap: 8px; }
 dialog .row { display: flex; gap: 6px; }
 dialog .row input { flex: 1; }
+dialog .row.wrap { flex-wrap: wrap; }
+dialog.wide { width: min(720px, 94vw); }
+dialog h3 { margin: 8px 0 0; font-size: 14px; }
+dialog menu .grow { flex: 1; }
+.prop-row { display: grid; grid-template-columns: 1fr 9em auto; gap: 6px; align-items: center;
+  padding: 8px 0; border-bottom: 1px solid var(--border); }
+.prop-row .kind { color: var(--muted); font-size: 12px; }
+.prop-row .opts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.prop-row .opts input { width: 10em; }
+.prop-row .btns { display: flex; gap: 4px; align-items: center; }
+.props-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 8px; align-items: center; font-size: 12px; color: var(--muted); }
+.props-grid > :nth-child(even) { color: var(--text); }
+.nav li.sub { padding-left: 14px; }
+.nav .group { color: var(--muted); font-size: 12px; margin-top: 6px; cursor: default; }
 dialog .small, .small { font-size: 12px; margin: 0; }
 dialog .message { white-space: pre-line; margin: 0; }
 dialog h2 + p { margin-top: 0; }

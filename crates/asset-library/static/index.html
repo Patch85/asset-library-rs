@@ -35,6 +35,10 @@
         <h3>Types</h3>
         <ul class="nav" id="types"></ul>
       </section>
+      <section id="props-section">
+        <h3>Properties <button id="edit-props" class="ghost small" title="Edit properties">✎</button></h3>
+        <div id="props"></div>
+      </section>
       <section>
         <h3>Colors</h3>
         <div id="colors" class="swatches"></div>
@@ -108,6 +112,9 @@
         <tr><td><code>is:fav</code> <code>is:untagged</code> <code>is:transparent</code> <code>is:missing</code></td><td>flags</td></tr>
         <tr><td><code>w&gt;=512</code> <code>h&lt;300</code></td><td>pixel dimensions</td></tr>
         <tr><td><code>color:pink</code> <code>-color:black</code></td><td>dominant colours</td></tr>
+        <tr><td><code>size:large</code> <code>-view:portrait</code> <code>pack:"forgotten adventures"</code></td><td>property values</td></tr>
+        <tr><td><code>grid&gt;=70</code></td><td>number properties</td></tr>
+        <tr><td><code>has:size</code> <code>-has:size</code></td><td>property set / not set</td></tr>
         <tr><td><code>~"lizard humanoid with a spear"</code></td><td>describe the image in plain words (AI)</td></tr>
         <tr><td><code>similar:123</code></td><td>looks like asset 123 — or use <b>Find similar</b> (AI)</td></tr>
       </table>
@@ -157,6 +164,39 @@
         <button type="button" id="import-btn">Import</button></span>
       </label>
       <menu><button value="cancel" formnovalidate>Cancel</button><button value="ok" class="primary">Save</button></menu>
+    </form>
+  </dialog>
+
+  <dialog id="props-dialog" class="wide">
+    <form method="dialog">
+      <h2>Properties</h2>
+      <p class="muted small">Properties have one value per asset, for how it's made or used (a token's
+        view or size, a map's grid). Tags stay for what's in it.</p>
+      <label>For type <select name="ptype"></select></label>
+      <div id="props-list"></div>
+      <h3>Add a property</h3>
+      <div class="row wrap">
+        <input name="new_label" placeholder="Name, e.g. Base">
+        <select name="new_kind">
+          <option value="choice">Choice</option><option value="text">Text</option><option value="number">Number</option>
+        </select>
+        <input name="new_options" placeholder="Choices, comma-separated">
+        <button type="button" id="add-prop">Add</button>
+      </div>
+      <menu><button class="primary">Done</button></menu>
+    </form>
+  </dialog>
+
+  <dialog id="tag-dialog">
+    <form method="dialog">
+      <h2>Tag "<span class="name"></span>"</h2>
+      <label>Rename <span class="muted small">(an existing name merges them)</span>
+        <span class="row"><input name="new_name" autocomplete="off"><button value="rename">Rename</button></span>
+      </label>
+      <label>Move to a property <span class="muted small">(sets it on every asset with this tag, then removes the tag)</span>
+        <span class="row"><select name="field"></select><span class="value-slot"></span><button value="move">Move</button></span>
+      </label>
+      <menu><button value="delete" class="danger">Delete tag</button><span class="grow"></span><button value="cancel" formnovalidate>Cancel</button></menu>
     </form>
   </dialog>
 
