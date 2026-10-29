@@ -17,7 +17,7 @@ finds 245/245 deterministic responses identical on the real library, and `cargo 
 the golden comparisons when `fixtures/golden/` and `models/` are present.
 
 Setup for a fresh checkout: `python tools/fetch_onnxruntime.py` (ONNX Runtime 1.30.0 into
-`vendor/onnxruntime/lib`; debug builds find it there, and the desktop bundle ships it as a
+`vendor/onnxruntime/<platform>`; debug builds find it there, and the desktop bundle ships it as a
 resource).
 
 ### Testing M7

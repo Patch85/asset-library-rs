@@ -21,6 +21,17 @@ const ORT_LIB: &str = "libonnxruntime.dylib";
 #[cfg(not(any(windows, target_os = "macos")))]
 const ORT_LIB: &str = "libonnxruntime.so";
 
+/// tools/fetch_onnxruntime.py's folder name for this platform.
+const VENDOR_PLATFORM: &str = if cfg!(windows) {
+    "win-x64"
+} else if cfg!(target_os = "macos") {
+    "osx-arm64"
+} else if cfg!(target_arch = "aarch64") {
+    "linux-aarch64"
+} else {
+    "linux-x64"
+};
+
 /// Where to look for ONNX Runtime: `ORT_DYLIB_PATH`, then `extra_dirs`, then next to the
 /// executable (and `lib/` beside it), then, in debug builds, the repo's vendor directory.
 fn runtime_candidates(extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -32,7 +43,8 @@ fn runtime_candidates(extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
         out.push(exe_dir.join("../Frameworks").join(ORT_LIB)); // macOS app bundle
     }
     if cfg!(debug_assertions) {
-        out.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/onnxruntime/lib").join(ORT_LIB));
+        let vendor = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/onnxruntime");
+        out.push(vendor.join(VENDOR_PLATFORM).join(ORT_LIB));
     }
     out
 }

@@ -1,9 +1,10 @@
-"""Download the official ONNX Runtime build for this platform into vendor/onnxruntime/lib.
+"""Download the official ONNX Runtime build into vendor/onnxruntime/<platform>/.
 
 The app loads ONNX Runtime at runtime (ort's load-dynamic) instead of linking it, because
 ort's prebuilt static library needs glibc 2.38+ and Microsoft's builds run on older Linux.
-Debug builds find vendor/onnxruntime/lib on their own; release builds and installers ship
-the library next to the executable.
+Debug builds find the host platform's folder on their own; installers bundle the target's
+folder as a resource (crates/desktop/tauri.<os>.conf.json). Fetch another platform's build to
+cross-compile, e.g. --platform win-x64 for the Windows installer.
 
 Usage: python tools/fetch_onnxruntime.py [--platform linux-x64|linux-aarch64|osx-arm64|win-x64]
 """
@@ -19,7 +20,7 @@ from pathlib import Path
 
 VERSION = "1.30.0"  # ort 2.0.0-rc.15 supports ONNX Runtime 1.24-1.31
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "vendor" / "onnxruntime" / "lib"
+VENDOR = ROOT / "vendor" / "onnxruntime"
 
 
 def detect() -> str:
@@ -45,12 +46,13 @@ def main():
     ext = "zip" if plat.startswith("win") else "tgz"
     name = f"onnxruntime-{plat}-{VERSION}"
     url = f"https://github.com/microsoft/onnxruntime/releases/download/v{VERSION}/{name}.{ext}"
+    out = VENDOR / plat
     print(f"downloading {url}")
     data = urllib.request.urlopen(url).read()
 
-    if OUT.exists():
-        shutil.rmtree(OUT)
-    OUT.mkdir(parents=True)
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
     wanted = ("onnxruntime.dll", "onnxruntime_providers_shared.dll", "libonnxruntime.so",
               "libonnxruntime.dylib", "libonnxruntime_providers_shared.so")
     if ext == "zip":
@@ -62,16 +64,15 @@ def main():
                        if "/lib/" in m.name and m.isfile()]
     for path, content in members:
         base = Path(path).name
-        # Keep the plain names (and versioned .so/.dylib files the plain names point to).
-        if base in wanted or base.startswith(("libonnxruntime.so.", "libonnxruntime.1.")):
-            (OUT / base).write_bytes(content)
-    # tar symlinks don't come through extractfile(); provide the plain name the app looks for.
-    for plain, prefix in (("libonnxruntime.so", "libonnxruntime.so."),
-                          ("libonnxruntime.dylib", "libonnxruntime.1.")):
-        versioned = sorted(OUT.glob(prefix + "*"))
-        if versioned and not (OUT / plain).exists():
-            shutil.copy2(versioned[-1], OUT / plain)
-    print("wrote", ", ".join(sorted(f.name for f in OUT.iterdir())))
+        # Versioned .so/.dylib files (the plain names are symlinks to them in the archive)
+        # are saved under the plain name the app loads.
+        if base.startswith("libonnxruntime.so."):
+            base = "libonnxruntime.so"
+        elif base.startswith("libonnxruntime.1.") and base.endswith(".dylib"):
+            base = "libonnxruntime.dylib"
+        if base in wanted:
+            (out / base).write_bytes(content)
+    print("wrote", ", ".join(sorted(f.name for f in out.iterdir())))
 
 
 if __name__ == "__main__":

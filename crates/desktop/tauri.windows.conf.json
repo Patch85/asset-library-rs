@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../../vendor/onnxruntime/win-x64/*": "onnxruntime/"
+    }
+  }
+}

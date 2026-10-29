@@ -31,7 +31,7 @@ ASSET_LIBRARY_AI=0|1                # 0 = colours only
 ## Commands
 
 ```bash
-parity/.venv/bin/python tools/fetch_onnxruntime.py     # once per checkout: ONNX Runtime into vendor/
+parity/.venv/bin/python tools/fetch_onnxruntime.py     # once per checkout (add --platform win-x64 to cross-build)
 parity/.venv/bin/pytest parity                         # against the Python original
 PARITY_IMPL=rust parity/.venv/bin/pytest parity        # against target/debug/asset-library
 cargo test --workspace                                 # unit tests + golden comparisons (if fixtures exist)
@@ -42,4 +42,4 @@ target/release/asset-library bench <folder>            # speed and memory on thi
 ```
 
 Release builds load ONNX Runtime from next to the executable (or `ORT_DYLIB_PATH`); copy
-`vendor/onnxruntime/lib/*` there before running `target/release/asset-library` with AI on.
+`vendor/onnxruntime/<platform>/*` there before running `target/release/asset-library` with AI on.
