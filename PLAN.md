@@ -11,17 +11,20 @@ Development happens in WSL; installers are built by GitHub Actions.
 
 ## Next up (resume here)
 
-M8 (properties, designed below) is built and waiting for the user to try it in the Windows
-installer (`tools/build_windows.sh`). M7 is installed on the user's Windows machine and being
-tested there; fix what they report as it comes. Then M9 (release).
+M9 (Dungeondraft packs, designed below) is built; M8 (properties) is built. Both wait for
+the user to try them in the Windows installer (`tools/build_windows.sh`). Then M10 (release).
 
-M8 checks so far: 25 regression tests (`parity/`, 8 new), unit tests in `properties.rs` and
-`search.rs`, a headless-Chromium run through the UI (single and bulk edits, facets, suggestions,
-editor, tag-to-property), and suggestions on the real library (size from filenames, and from
-same-size images once a few are labelled).
-M0–M6 are done: all 17 parity tests pass with `PARITY_IMPL=rust`, `tools/diff_servers.py`
-finds 245/245 deterministic responses identical on the real library, and `cargo test` runs
-the golden comparisons when `fixtures/golden/` and `models/` are present.
+M9 checks so far: 7 regression tests (`parity/test_packs.py`, synthetic packs), unit tests in
+`ddpack.rs` and `location.rs`, all 61 real packs parse (`DDPACK_DIR=... cargo test real_packs
+-- --ignored`), three real packs (8,103 images) scan in 4.5 s with thumbnails and colours 13 s
+later and a 0.2 s unchanged rescan, and export-every-result driven in headless Chromium.
+All 61 real packs (release build, WSL reading /mnt/c): 92,428 images scanned in 84 s with no
+errors, 91,405 unique thumbnails + colours in 200 s with 0 failures (864 MB of thumbnails,
+87 MB database), searches 6-160 ms, facets + tags 271 ms, unchanged rescan 0.5 s. The first
+full run found reindex_fts exceeding SQLite's variable limit (fixed: id lists are chunked).
+
+M8 checks: 25 regression tests (`parity/`), unit tests in `properties.rs` and `search.rs`, a
+headless-Chromium run through the UI, and suggestions on the real library.
 
 Setup for a fresh checkout: `python tools/fetch_onnxruntime.py` (ONNX Runtime 1.30.0 into
 `vendor/onnxruntime/<platform>`; debug builds find it there, and the desktop bundle ships it as a
