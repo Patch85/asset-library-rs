@@ -11,8 +11,14 @@ Development happens in WSL; installers are built by GitHub Actions.
 
 ## Next up (resume here)
 
-Building M8 (properties), designed below. M7 is installed on the user's Windows machine and
-being tested there; fix what they report as it comes.
+M8 (properties, designed below) is built and waiting for the user to try it in the Windows
+installer (`tools/build_windows.sh`). M7 is installed on the user's Windows machine and being
+tested there; fix what they report as it comes. Then M9 (release).
+
+M8 checks so far: 25 regression tests (`parity/`, 8 new), unit tests in `properties.rs` and
+`search.rs`, a headless-Chromium run through the UI (single and bulk edits, facets, suggestions,
+editor, tag-to-property), and suggestions on the real library (size from filenames, and from
+same-size images once a few are labelled).
 M0–M6 are done: all 17 parity tests pass with `PARITY_IMPL=rust`, `tools/diff_servers.py`
 finds 245/245 deterministic responses identical on the real library, and `cargo test` runs
 the golden comparisons when `fixtures/golden/` and `models/` are present.

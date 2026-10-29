@@ -34,7 +34,8 @@ ASSET_LIBRARY_AI=0|1                # 0 = colours only
 
 ```bash
 parity/.venv/bin/python tools/fetch_onnxruntime.py     # once per checkout (add --platform win-x64 to cross-build)
-PARITY_IMPL=rust parity/.venv/bin/pytest parity        # regression suite against target/debug/asset-library
+parity/.venv/bin/pytest parity                         # regression suite against target/debug/asset-library
+PARITY_IMPL=python parity/.venv/bin/pytest parity      # pre-divergence tests against the original
 cargo test --workspace                                 # unit tests + golden comparisons (if fixtures exist)
 parity/.venv/bin/python tools/make_golden.py           # regenerate fixtures/golden from ../asset-library
 parity/.venv/bin/python tools/diff_servers.py          # historical: Python vs Rust on the real library
