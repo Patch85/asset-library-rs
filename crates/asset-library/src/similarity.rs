@@ -144,6 +144,30 @@ pub struct Suggestion {
     pub source: &'static str,
 }
 
+/// The asset's nearest neighbours as (index position, similarity), excluding itself and exact
+/// duplicates; `None` if it has no embedding or there's nothing to compare with.
+pub fn neighbours(idx: &Index, asset_id: i64) -> Option<Vec<(usize, f32)>> {
+    let &n = idx.pos.get(&asset_id)?;
+    let mut scores = idx.scores(idx.vector(n));
+    for (j, s) in scores.iter_mut().enumerate() {
+        if idx.hashes[j] == idx.hashes[n] {
+            *s = -1.0;
+        }
+    }
+    let k = K_NEIGHBOURS.min(scores.len().saturating_sub(1));
+    if k == 0 {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..scores.len()).collect();
+    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+    Some(order[..k].iter().map(|&j| (j, scores[j])).collect())
+}
+
+/// Asset id at an index position (from `neighbours`).
+pub fn id_at(idx: &Index, pos: usize) -> i64 {
+    idx.ids[pos]
+}
+
 pub fn round_to(x: f64, digits: usize) -> f64 {
     format!("{x:.digits$}").parse().unwrap_or(x)
 }
@@ -176,23 +200,8 @@ pub fn suggest(db: &Database, idx: &Index, asset_ids: &[i64], limit: usize) -> r
     })?;
 
     // Nearest neighbours for every asset first, so their tags load in one query.
-    let mut neighbours: HashMap<i64, Vec<(usize, f32)>> = HashMap::new();
-    for &aid in asset_ids {
-        let Some(&n) = idx.pos.get(&aid) else { continue };
-        let mut scores = idx.scores(idx.vector(n));
-        for (j, s) in scores.iter_mut().enumerate() {
-            if idx.hashes[j] == idx.hashes[n] {
-                *s = -1.0; // itself and exact duplicates
-            }
-        }
-        let k = K_NEIGHBOURS.min(scores.len().saturating_sub(1));
-        if k == 0 {
-            continue;
-        }
-        let mut order: Vec<usize> = (0..scores.len()).collect();
-        order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
-        neighbours.insert(aid, order[..k].iter().map(|&j| (j, scores[j])).collect());
-    }
+    let neighbours: HashMap<i64, Vec<(usize, f32)>> =
+        asset_ids.iter().filter_map(|&aid| Some((aid, neighbours(idx, aid)?))).collect();
 
     let mut want: Vec<i64> = asset_ids.to_vec();
     want.extend(neighbours.values().flatten().map(|&(j, _)| idx.ids[j]));

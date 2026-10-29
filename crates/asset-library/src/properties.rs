@@ -550,3 +550,186 @@ mod tests {
         .unwrap();
     }
 }
+
+// ---------------------------------------------------------------- suggestions
+
+/// A value suggested for a property the asset hasn't set.
+#[derive(Clone, Debug, Serialize)]
+pub struct FieldSuggestion {
+    pub field: String,
+    pub label: String,
+    pub value: Value,
+    pub score: f64,
+    pub source: String,
+}
+
+/// How rejections of property suggestions are stored (alongside rejected tags).
+pub fn reject_key(field: &str, value: &Value) -> String {
+    let v = value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string());
+    normalize_tag(&format!("{field}={v}")) // the reject endpoint normalizes like a tag
+}
+
+/// Words of the whole relative path (folders too), lowercased, split on punctuation and
+/// camelCase, plus adjacent pairs joined with `-` and run together ("top-down", "topdown").
+fn path_words(rel_path: &str) -> std::collections::HashSet<String> {
+    let mut words: Vec<String> = Vec::new();
+    let stemmed = rel_path.rsplit_once('.').map_or(rel_path, |(s, _)| s);
+    for part in stemmed.split(|c: char| !c.is_alphanumeric()) {
+        let mut cur = String::new();
+        let mut prev_lower = false;
+        for ch in part.chars() {
+            if ch.is_uppercase() && prev_lower {
+                words.push(std::mem::take(&mut cur).to_lowercase());
+            }
+            prev_lower = ch.is_lowercase();
+            cur.push(ch);
+        }
+        if !cur.is_empty() {
+            words.push(cur.to_lowercase());
+        }
+    }
+    let mut out: std::collections::HashSet<String> = words.iter().cloned().collect();
+    for w in words.windows(2) {
+        out.insert(format!("{}-{}", w[0], w[1]));
+        out.insert(format!("{}{}", w[0], w[1]));
+    }
+    out
+}
+
+/// Majority value of `field_id` among other assets matching `filter` (an SQL condition on
+/// `b`), as (value, share) when at least `min` assets have one and the share is >= 0.6.
+fn majority(c: &Connection, field_id: i64, aid: i64, filter: &str, params: Vec<SqlValue>, min: i64) -> rusqlite::Result<Option<(SqlValue, f64)>> {
+    let sql = format!(
+        "SELECT af.value, count(*) FROM assets b JOIN asset_fields af ON af.asset_id = b.id AND af.field_id = ?
+         WHERE b.id <> ? AND b.missing = 0 AND {filter} GROUP BY af.value ORDER BY 2 DESC"
+    );
+    let mut stmt = c.prepare_cached(&sql)?;
+    let all: Vec<SqlValue> = [SqlValue::from(field_id), SqlValue::from(aid)].into_iter().chain(params).collect();
+    let rows: Vec<(SqlValue, i64)> = stmt.query_map(params_from_iter(all), |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    let total: i64 = rows.iter().map(|r| r.1).sum();
+    Ok(match rows.into_iter().next() {
+        Some((v, n)) if total >= min && n as f64 / total as f64 >= 0.6 => Some((v, n as f64 / total as f64)),
+        _ => None,
+    })
+}
+
+/// Per asset: at most one suggestion per unset property, best first. Sources: filename
+/// words, same pixel size in the same source, same folder, and look-alikes.
+pub fn suggest_fields(
+    c: &Connection,
+    idx: &crate::similarity::Index,
+    asset_ids: &[i64],
+) -> rusqlite::Result<Vec<(i64, Vec<FieldSuggestion>)>> {
+    let fields = fields_by_type(c)?;
+    let ignored: std::collections::HashSet<String> = {
+        let mut stmt = c.prepare("SELECT tag FROM suggestion_ignore")?;
+        let r = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        r
+    };
+    let current = values_for(c, asset_ids)?;
+    let mut out = Vec::new();
+    for &aid in asset_ids {
+        let Some((asset_type, source_id, width, height, rel)): Option<(String, i64, Option<i64>, Option<i64>, String)> = c
+            .query_row(
+                "SELECT asset_type, source_id, width, height, rel_path FROM assets WHERE id = ?",
+                params![aid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?
+        else {
+            continue;
+        };
+        let Some(type_fields) = fields.get(&asset_type) else { continue };
+        let mut per_asset_rejects = ignored.clone();
+        {
+            let mut stmt = c.prepare_cached("SELECT tag FROM suggestion_rejects WHERE asset_id = ?")?;
+            for t in stmt.query_map(params![aid], |r| r.get::<_, String>(0))? {
+                per_asset_rejects.insert(t?);
+            }
+        }
+        let words = path_words(&rel);
+        let folder = rel.rsplit_once('/').map(|(d, _)| d.to_string());
+        let near = crate::similarity::neighbours(idx, aid);
+        let near_values = match &near {
+            Some(n) => values_for(c, &n.iter().map(|&(j, _)| crate::similarity::id_at(idx, j)).collect::<Vec<_>>())?,
+            None => HashMap::new(),
+        };
+        let have = current.get(&aid);
+
+        let mut list = Vec::new();
+        let mut ordered: Vec<&Field> = type_fields.values().collect();
+        ordered.sort_by_key(|f| (f.position, f.id));
+        for f in ordered {
+            if have.is_some_and(|m| m.keys().any(|k| k.eq_ignore_ascii_case(&f.key))) {
+                continue;
+            }
+            // value (as JSON) -> (best score, sources)
+            let mut cands: Vec<(Value, f64, Vec<&str>)> = Vec::new();
+            let mut add = |v: Value, score: f64, src: &'static str| match cands.iter_mut().find(|c| c.0 == v) {
+                Some(c) => {
+                    c.1 = (c.1.max(score) + 0.1).min(0.99);
+                    c.2.push(src);
+                }
+                None => cands.push((v, score, vec![src])),
+            };
+            if f.kind == "choice" {
+                for o in &f.options {
+                    let lo = o.to_lowercase();
+                    if words.contains(&lo) || words.contains(&lo.replace('-', "")) {
+                        add(Value::from(o.clone()), 0.9, "filename");
+                    }
+                }
+            }
+            if let (Some(w), Some(h)) = (width, height) {
+                let filter = "b.source_id = ? AND b.width = ? AND b.height = ?";
+                if let Some((v, share)) = majority(c, f.id, aid, filter, vec![source_id.into(), w.into(), h.into()], 3)? {
+                    add(to_json(v), share * 0.85, "same size");
+                }
+            }
+            if let Some(dir) = &folder {
+                let prefix = format!("{}/", dir.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+                let filter = "b.source_id = ? AND b.rel_path LIKE ? ESCAPE '\\' AND instr(substr(b.rel_path, ?), '/') = 0";
+                let start = dir.chars().count() as i64 + 2;
+                if let Some((v, share)) = majority(c, f.id, aid, filter, vec![source_id.into(), format!("{prefix}%").into(), start.into()], 2)? {
+                    add(to_json(v), share * 0.85, "same folder");
+                }
+            }
+            if let Some(n) = &near {
+                let min = n.iter().map(|t| t.1).fold(f32::INFINITY, f32::min);
+                let mut votes: Vec<(Value, f64)> = Vec::new();
+                let mut total = 0.0;
+                for &(j, sim) in n {
+                    let wt = ((sim - min).max(0.0) + 1e-3) as f64;
+                    total += wt;
+                    let id = crate::similarity::id_at(idx, j);
+                    let Some(v) = near_values.get(&id).and_then(|m| m.iter().find(|(k, _)| k.eq_ignore_ascii_case(&f.key))) else { continue };
+                    match votes.iter_mut().find(|x| &x.0 == v.1) {
+                        Some(x) => x.1 += wt,
+                        None => votes.push((v.1.clone(), wt)),
+                    }
+                }
+                if let Some((v, w)) = votes.into_iter().max_by(|a, b| a.1.total_cmp(&b.1))
+                    && w / total >= 0.5
+                {
+                    add(v, w / total, "look-alike");
+                }
+            }
+            let best = cands
+                .into_iter()
+                .filter(|c| c.1 >= 0.5 && !per_asset_rejects.contains(&reject_key(&f.key, &c.0)))
+                .max_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((value, score, sources)) = best {
+                list.push(FieldSuggestion {
+                    field: f.key.clone(),
+                    label: f.label.clone(),
+                    value,
+                    score: crate::similarity::round_to(score, 2),
+                    source: sources.join(" + "),
+                });
+            }
+        }
+        list.sort_by(|a, b| b.score.total_cmp(&a.score));
+        out.push((aid, list));
+    }
+    Ok(out)
+}

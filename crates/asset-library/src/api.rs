@@ -654,55 +654,78 @@ struct SuggestIn {
 
 #[derive(Serialize)]
 struct Merged {
+    /// The tag, or `key=value` for a property; what /api/suggestions/reject takes.
     tag: String,
     ids: Vec<i64>,
     count: usize,
     score: f64,
     source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<Value>,
+}
+
+/// Merge per-asset suggestions by identity, in first-seen order: averaged score, the ids each
+/// applies to, and all sources. Single asset: best first; several: most widely applicable.
+fn merge_suggestions(items: impl Iterator<Item = (i64, Merged)>) -> Vec<Merged> {
+    let mut merged: Vec<(Merged, std::collections::BTreeSet<String>)> = Vec::new();
+    for (aid, sg) in items {
+        let pos = match merged.iter().position(|m| m.0.tag == sg.tag) {
+            Some(p) => p,
+            None => {
+                merged.push((Merged { ids: Vec::new(), score: 0.0, source: String::new(), count: 0, ..sg }, Default::default()));
+                merged.len() - 1
+            }
+        };
+        let m = &mut merged[pos];
+        m.0.ids.push(aid);
+        m.0.score += sg.score;
+        m.1.insert(sg.source);
+    }
+    let mut out: Vec<Merged> = merged
+        .into_iter()
+        .map(|(mut m, sources)| {
+            m.count = m.ids.len();
+            m.score = similarity::round_to(m.score / m.count as f64, 2);
+            m.source = sources.into_iter().collect::<Vec<_>>().join(" / ");
+            m
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        (b.count as f64 * b.score).total_cmp(&(a.count as f64 * a.score)).then_with(|| a.tag.cmp(&b.tag))
+    });
+    out
 }
 
 /// Single asset: its suggestions. Several: merged, with which assets each applies to.
+/// Property values come first, then tags.
 async fn suggestions(State(s): St, Json(body): Json<SuggestIn>) -> ApiResult {
     let ids: Vec<i64> = body.ids.into_iter().take(500).collect();
     if ids.is_empty() {
         return Ok(Json(json!([])));
     }
-    let per = tokio::task::block_in_place(|| {
+    let (tags, fields) = tokio::task::block_in_place(|| -> rusqlite::Result<_> {
         let idx = s.jobs.analysis.index.get(&s.db)?;
-        similarity::suggest(&s.db, &idx, &ids, 12)
+        let tags = similarity::suggest(&s.db, &idx, &ids, 12)?;
+        let fields = s.db.tx(|c| properties::suggest_fields(c, &idx, &ids))?;
+        Ok((tags, fields))
     })?;
-    // Keyed in first-seen order, like the original's dict.
-    let mut merged: Vec<(String, Vec<i64>, f64, std::collections::BTreeSet<&str>)> = Vec::new();
-    for (aid, items) in &per {
-        for sg in items {
-            let pos = match merged.iter().position(|m| m.0 == sg.tag) {
-                Some(p) => p,
-                None => {
-                    merged.push((sg.tag.clone(), Vec::new(), 0.0, Default::default()));
-                    merged.len() - 1
-                }
-            };
-            let m = &mut merged[pos];
-            m.1.push(*aid);
-            m.2 += sg.score;
-            m.3.insert(sg.source);
-        }
-    }
-    let mut out: Vec<Merged> = merged
-        .into_iter()
-        .map(|(tag, ids, score, sources)| Merged {
-            count: ids.len(),
-            score: similarity::round_to(score / ids.len() as f64, 2),
-            source: sources.into_iter().collect::<Vec<_>>().join(" / "),
-            tag,
-            ids,
+    let mut out = merge_suggestions(fields.into_iter().flat_map(|(aid, list)| {
+        list.into_iter().map(move |f| {
+            let tag = properties::reject_key(&f.field, &f.value);
+            (aid, Merged { tag, ids: vec![], count: 0, score: f.score, source: f.source, field: Some(f.field), label: Some(f.label), value: Some(f.value) })
         })
-        .collect();
-    // Single asset: best first. Several: most widely applicable first.
-    out.sort_by(|a, b| {
-        (b.count as f64 * b.score).total_cmp(&(a.count as f64 * a.score)).then_with(|| a.tag.cmp(&b.tag))
-    });
-    out.truncate(25);
+    }));
+    let mut tag_list = merge_suggestions(tags.into_iter().flat_map(|(aid, list)| {
+        list.into_iter().map(move |t| {
+            (aid, Merged { tag: t.tag, ids: vec![], count: 0, score: t.score, source: t.source.to_string(), field: None, label: None, value: None })
+        })
+    }));
+    tag_list.truncate(25);
+    out.extend(tag_list);
     Ok(Json(serde_json::to_value(out).unwrap_or_default()))
 }
 
