@@ -77,8 +77,7 @@ impl Analysis {
                        AND (f.file_hash IS NULL OR f.colors IS NULL
                             OR (? AND (f.embedding IS NULL OR f.embed_model IS NOT ?)))",
                 )?;
-                let rows = stmt.query_map(params![ai, IMAGE_MODEL], |r| r.get(0))?.collect();
-                rows
+                stmt.query_map(params![ai, IMAGE_MODEL], |r| r.get(0))?.collect()
             })
             .unwrap_or_default();
         let todo: Vec<String> = rows.into_iter().filter(|h| self.thumbs.path(h).exists()).collect();

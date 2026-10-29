@@ -86,14 +86,14 @@ pub fn parse(q: &str) -> Query {
             }
             continue;
         }
-        if key.is_empty() {
-            if let Some(d) = DIM_RE.captures(&m[0]) {
-                if let Ok(n) = d[4].parse() {
-                    let col = if &d[2] == "w" { "width" } else { "height" };
-                    out.dims.push((col, d[3].to_string(), n));
-                }
-                continue;
+        if key.is_empty()
+            && let Some(d) = DIM_RE.captures(&m[0])
+        {
+            if let Ok(n) = d[4].parse() {
+                let col = if &d[2] == "w" { "width" } else { "height" };
+                out.dims.push((col, d[3].to_string(), n));
             }
+            continue;
         }
         let val = raw.trim_matches('"');
         if val.is_empty() {

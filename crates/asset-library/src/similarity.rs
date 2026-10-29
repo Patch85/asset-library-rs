@@ -150,14 +150,12 @@ pub fn round_to(x: f64, digits: usize) -> f64 {
 
 fn query_pairs(c: &Connection, sql: &str, ids: &[i64]) -> rusqlite::Result<Vec<(i64, String)>> {
     let mut stmt = c.prepare(&sql.replace("{marks}", &marks(ids.len())))?;
-    let rows = stmt.query_map(params_from_iter(ids), |r| Ok((r.get(0)?, r.get(1)?)))?.collect();
-    rows
+    stmt.query_map(params_from_iter(ids), |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
 }
 
 fn column(c: &Connection, sql: &str) -> rusqlite::Result<HashSet<String>> {
     let mut stmt = c.prepare(sql)?;
-    let rows = stmt.query_map([], |r| r.get(0))?.collect();
-    rows
+    stmt.query_map([], |r| r.get(0))?.collect()
 }
 
 /// Per asset: suggestions best first. Sources: filename, look-alike, or both.

@@ -95,8 +95,7 @@ impl AppState {
             .db
             .tx(|c| {
                 let mut stmt = c.prepare("SELECT id FROM sources")?;
-                let ids = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>();
-                ids
+                stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()
             })
             .unwrap_or_default();
         self.start_scan(ids)
@@ -174,7 +173,7 @@ fn asset_row(c: &Connection, id: i64) -> ApiResult<Map<String, Value>> {
         "SELECT a.*, s.path AS source_path, s.name AS source_name
          FROM assets a JOIN sources s ON s.id = a.source_id WHERE a.id = ?",
         params![id],
-        |r| row_json(r),
+        row_json,
     )
     .optional()?
     .ok_or_else(|| err(StatusCode::NOT_FOUND, "Asset not found"))
@@ -733,8 +732,7 @@ async fn list_tags(State(s): St) -> ApiResult {
 
 fn assets_with_tag(c: &Connection, tag_id: i64) -> rusqlite::Result<Vec<i64>> {
     let mut stmt = c.prepare("SELECT asset_id FROM asset_tags WHERE tag_id = ?")?;
-    let ids = stmt.query_map(params![tag_id], |r| r.get(0))?.collect();
-    ids
+    stmt.query_map(params![tag_id], |r| r.get(0))?.collect()
 }
 
 fn tag_id(c: &Connection, name: &str) -> rusqlite::Result<Option<i64>> {

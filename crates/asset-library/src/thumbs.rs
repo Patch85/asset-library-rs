@@ -81,14 +81,13 @@ impl Thumbs {
                      JOIN sources s ON s.id = a.source_id
                      WHERE a.missing = 0 ORDER BY a.name COLLATE NOCASE", // matches default sort
                 )?;
-                let rows = stmt
+                stmt
                     .query_map([], |r| {
                         let root: String = r.get(1)?;
                         let rel: String = r.get(2)?;
                         Ok((r.get(0)?, join_rel(Path::new(&root), &rel)))
                     })?
-                    .collect::<rusqlite::Result<Vec<_>>>();
-                rows
+                    .collect::<rusqlite::Result<Vec<_>>>()
             })
             .unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
