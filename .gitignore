@@ -1,0 +1,7 @@
+/target/
+/models/
+/fixtures/golden/
+/parity/.venv/
+__pycache__/
+.pytest_cache/
+*.log
