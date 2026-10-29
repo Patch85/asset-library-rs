@@ -122,7 +122,7 @@ pub fn default_threads() -> usize {
 
 /// Decode the first frame, apply EXIF orientation, fit within THUMB_SIZE and encode as
 /// lossy WebP, as Pillow's `thumbnail()` + `save(quality=85)` do.
-fn render(source: &Path) -> anyhow::Result<Vec<u8>> {
+pub fn render(source: &Path) -> anyhow::Result<Vec<u8>> {
     let mut decoder = ImageReader::open(source)?.with_guessed_format()?.into_decoder()?;
     let orientation = decoder.orientation()?;
     let mut img = DynamicImage::from_decoder(decoder)?;
