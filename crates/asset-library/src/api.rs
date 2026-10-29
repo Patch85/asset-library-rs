@@ -59,6 +59,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/settings", get(get_settings).patch(update_settings))
         .route("/api/pick-folder", post(pick_folder))
         .route("/api/drag", post(start_drag))
+        .route("/api/assets/{id}/open", post(open_file))
+        .route("/api/export/zip-save", post(export_zip_save))
         .route("/api/import", post(import_library))
         .route("/api/tags/{name}", patch(rename_tag).delete(delete_tag))
         .fallback(get(static_file))
@@ -1001,6 +1003,36 @@ async fn start_drag(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
         .start_drag(files, icon.unwrap_or_default())
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     ok()
+}
+
+/// Open the original in the system's default app.
+async fn open_file(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Path(id): Path<i64>) -> ApiResult {
+    local_only(addr)?;
+    let path = full_path(&s.tx(|c| asset_row(c, id))?);
+    if !path.exists() {
+        return Err(err(StatusCode::NOT_FOUND, "File missing on disk"));
+    }
+    open::that_detached(&path).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    ok()
+}
+
+/// Build the zip and save it where the user picks (desktop app only; webviews don't
+/// reliably download blobs).
+async fn export_zip_save(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Json(body): Json<ExportIn>) -> ApiResult {
+    local_only(addr)?;
+    let Some(desktop) = s.desktop.clone() else {
+        return Err(err(StatusCode::BAD_REQUEST, "Saving needs the desktop app"));
+    };
+    let items = export_items(&s, &body.ids)?;
+    let Some(dest) = tokio::task::spawn_blocking(move || desktop.pick_save_file("assets.zip")).await.ok().flatten() else {
+        return Ok(Json(json!({ "path": "" })));
+    };
+    tokio::task::block_in_place(|| -> anyhow::Result<()> {
+        std::fs::write(&dest, export::build_zip(&items, body.flatten)?)?;
+        Ok(())
+    })
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(json!({ "path": dest.to_string_lossy() })))
 }
 
 #[derive(Deserialize)]

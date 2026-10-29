@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 pub trait Desktop: Send + Sync {
     /// Show a native folder picker; `None` if cancelled.
     fn pick_folder(&self) -> Option<PathBuf>;
+    /// Show a native save dialog; `None` if cancelled.
+    fn pick_save_file(&self, default_name: &str) -> Option<PathBuf>;
     /// Start a native drag of `files` out of the window, showing `icon_png`.
     fn start_drag(&self, files: Vec<PathBuf>, icon_png: Vec<u8>) -> anyhow::Result<()>;
 }
