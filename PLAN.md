@@ -11,21 +11,17 @@ Development happens in WSL; installers are built by GitHub Actions.
 
 ## Next up (resume here)
 
-M1 is done. `crates/asset-library` has the schema (`user_version` 1), scanner, sources,
-scan, asset list/get/patch and tag list endpoints. `PARITY_IMPL=rust` passes the 8 parity
-tests within M1's scope. The 9 that fail need M2 (thumbs, export), M3 (bulk, tag rename),
-M4 (colours, suggestions) or M5 (CLIP). The search query language (`search.rs`) was ported
-early, because the move/missing tests can only check their results through it.
+M1–M3 are done. `PARITY_IMPL=rust` passes all 11 library parity tests; the 6 analysis tests
+need M4 (colours, filename suggestions) and M5 (CLIP).
 
-A rescan of a copy of the real library (6785 files, source path rewritten to `/mnt/c/...`)
-updated 0 files, so Rust's `mtime` matches what Python stored and imports aren't rehashed.
+Real-library checks (copy of the golden DB, source path rewritten to `/mnt/c/...`):
+- A rescan updated 0 of 6785 files, so Rust's `mtime` matches what Python stored.
+- The release build warmed all 6785 thumbnails in 44 s (154/s, 21 threads, through `/mnt/c`)
+  with 0 failures. The 300 golden thumbnails match in size, and pixels differ by 1.1/255 on
+  average (3.3 max).
 
-1. Start M2: thumbnails at `thumbs/<hash[:2]>/<hash>.webp` (port `app/thumbs.py`),
-   the background pipeline (`jobs.py`), `/api/assets/{id}/thumb` and `/file`, zip and
-   folder export (`app/export.py`). Hook the pipeline into `AppState::start_scan` and
-   startup (the `TODO(M2)`s); `jobs::start` must set the warmer's `running` flag before it
-   returns (see `Scanner::scan_in_background`). Also replace the `thumbs` stub in
-   `scan_status`.
+1. Start M4: port `color_profile` and `analyze_pending` (colours only) into `analysis.rs`,
+   run it after thumbnails in `Jobs::run`, replace the `analysis` stub in `scan_status`.
 
 ## Milestones
 
@@ -33,9 +29,9 @@ updated 0 files, so Rust's `mtime` matches what Python stored and imports aren't
       golden fixtures from the real library (`tools/make_golden.py`).
 - [x] **M1 Storage and scanning.** Identical schema, SHA-1 hashing, move/missing detection,
       folder tags, junk skipping, sources and scan-status API.
-- [ ] **M2 Thumbnails and files.** Lossy WebP thumbs, parallel warmer, file serving,
+- [x] **M2 Thumbnails and files.** Lossy WebP thumbs, parallel warmer, file serving,
       zip and copy-to-folder export.
-- [ ] **M3 Search.** Query language to SQL, FTS5, tags API (rename/merge), bulk edits.
+- [x] **M3 Search.** Query language to SQL, FTS5, tags API (rename/merge), bulk edits.
 - [ ] **M4 Colours.** Port `color_profile`; compare against golden colours.
 - [ ] **M5 CLIP.** Image/text embeddings, similarity index, `similar:` / `~"..."`, tag
       suggestions; compare against golden embeddings and suggestions. Add an
