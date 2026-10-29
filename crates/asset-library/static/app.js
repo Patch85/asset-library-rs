@@ -30,6 +30,26 @@ async function api(path, opts = {}) {
   return opts.raw ? res : res.json();
 }
 
+/** In-page prompt/confirm (webviews don't all show the native ones). With `input`, resolves
+ *  to the text or null; otherwise to true/false. */
+function ask({ title, message = "", input = false, value = "", ok = "OK", danger = false }) {
+  const dlg = $("#ask-dialog");
+  const f = $("form", dlg);
+  $(".title", dlg).textContent = title;
+  $(".message", dlg).textContent = message;
+  f.answer.classList.toggle("hidden", !input);
+  f.answer.value = value;
+  const okBtn = $('button[value="ok"]', dlg);
+  okBtn.textContent = ok;
+  okBtn.classList.toggle("danger", danger);
+  dlg.showModal();
+  if (input) f.answer.select();
+  return new Promise((resolve) => dlg.addEventListener("close", () => {
+    const yes = dlg.returnValue === "ok";
+    resolve(input ? (yes ? f.answer.value : null) : yes);
+  }, { once: true }));
+}
+
 let toastTimer;
 function toast(msg, error = false, action = null) {
   const t = $("#toast");
@@ -243,6 +263,13 @@ function onDragStart(e) {
   const card = e.target.closest(".card");
   if (!card) return;
   const it = state.items[+card.dataset.idx];
+  if (state.meta.desktop) {
+    // A real file drag from the app, so drops work everywhere (and several files at once).
+    e.preventDefault();
+    const ids = state.selected.has(it.id) ? [...state.selected] : [it.id];
+    api("/api/drag", { method: "POST", body: { ids } }).catch((err) => toast(err.message, true));
+    return;
+  }
   const url = new URL(`/api/assets/${it.id}/file`, location.href).href;
   // Chrome/Edge: dropping onto Explorer or the desktop saves the original file.
   const filename = it.rel_path.split("/").pop();
@@ -296,7 +323,7 @@ function renderSingle(a) {
       <button id="d-fav">${a.favorite ? "★ Favorited" : "☆ Favorite"}</button>
       ${a.has_embedding ? '<button id="d-similar">Find similar</button>' : ""}
       <button id="d-reveal">Show in folder</button>
-      <a href="/api/assets/${a.id}/file" target="_blank"><button>Open</button></a>
+      <button id="d-open">Open</button>
       <button id="d-export">Export…</button>
     </div>
     <div class="meta">
@@ -325,6 +352,7 @@ function renderSingle(a) {
   $("#d-type").addEventListener("change", (e) => save({ asset_type: e.target.value }));
   $("#d-fav").addEventListener("click", async () => renderSingle(await save({ favorite: !a.favorite })));
   $("#d-reveal").addEventListener("click", () => api(`/api/assets/${a.id}/reveal`, { method: "POST" }));
+  $("#d-open").addEventListener("click", () => openOriginal(a.id));
   $("#d-similar")?.addEventListener("click", () => setQuery(`similar:${a.id}`));
   panel.querySelectorAll(".colors-row [data-color]").forEach((b) =>
     b.addEventListener("click", () => toggleFilter("color", b.dataset.color)));
@@ -467,12 +495,70 @@ function bindTagInput(onAdd) {
   input.addEventListener("input", () => { if (input.value.includes(",")) commit(); });
 }
 
+/** The desktop app opens files in their default app; a browser opens a new tab. */
+function openOriginal(id) {
+  if (state.meta.desktop) api(`/api/assets/${id}/open`, { method: "POST" }).catch((e) => toast(e.message, true));
+  else window.open(`/api/assets/${id}/file`, "_blank");
+}
+
 // ------------------------------------------------------------------ dialogs
 
 async function pickFolderInto(input) {
   try {
     const { path } = await api("/api/pick-folder", { method: "POST" });
     if (path) input.value = path;
+  } catch (e) { toast(e.message, true); }
+}
+
+async function openSettings() {
+  const dlg = $("#settings-dialog");
+  const f = $("form", dlg);
+  try {
+    const s = await api("/api/settings");
+    f.ai.checked = s.ai;
+    f.ai.disabled = s.ai_locked;
+    $("#ai-note").textContent = s.ai_locked
+      ? "Set by ASSET_LIBRARY_AI for this run."
+      : s.model_cached ? "Runs a local CLIP model (already downloaded). Nothing about your images leaves this computer."
+      : "Runs a local CLIP model. The first time, it downloads about 600 MB. Nothing about your images leaves this computer.";
+    f.threads.value = s.threads;
+    f.threads.max = s.max_threads;
+    f.batch.value = s.batch;
+    f.low_priority.checked = s.low_priority;
+    f.pause_on_battery.checked = s.pause_on_battery;
+    dlg.showModal();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function onSettingsClose() {
+  const dlg = $("#settings-dialog");
+  if (dlg.returnValue !== "ok") return;
+  const f = $("form", dlg);
+  const body = { threads: +f.threads.value, batch: +f.batch.value, low_priority: f.low_priority.checked,
+                 pause_on_battery: f.pause_on_battery.checked };
+  if (!f.ai.disabled) body.ai = f.ai.checked;
+  try {
+    const before = state.meta.ai;
+    await api("/api/settings", { method: "PATCH", body });
+    state.meta = await api("/api/meta");
+    toast("Settings saved");
+    if (state.meta.ai && !before) pollScan();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function importLibrary() {
+  const f = $("#settings-dialog form");
+  const path = f.import_path.value.trim();
+  if (!path) return toast("Choose the Python app's folder first", true);
+  toast("Importing…");
+  try {
+    const r = await api("/api/import", { method: "POST", body: { path } });
+    $("#settings-dialog").close("cancel");
+    toast(`Imported ${r.assets.toLocaleString()} assets and ${r.thumbnails.toLocaleString()} thumbnails` +
+          (r.copied_models ? ", plus the AI model" : ""));
+    await refreshSidebar();
+    reload();
+    pollScan();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -512,7 +598,10 @@ async function onExportClose() {
   const f = $("form", dlg);
   const body = { ids: [...state.selected], flatten: f.flatten.checked };
   try {
-    if (dlg.returnValue === "zip") {
+    if (dlg.returnValue === "zip" && state.meta.desktop) {
+      const { path } = await api("/api/export/zip-save", { method: "POST", body });
+      if (path) toast(`Saved ${path}`);
+    } else if (dlg.returnValue === "zip") {
       const res = await api("/api/export/zip", { method: "POST", body, raw: true });
       const a = Object.assign(document.createElement("a"), {
         href: URL.createObjectURL(await res.blob()), download: "assets.zip",
@@ -534,11 +623,12 @@ async function onTagContext(e) {
   if (!li) return;
   e.preventDefault();
   const name = li.dataset.tag;
-  const next = prompt(`Rename tag "${name}" (an existing name merges them).\nLeave empty to delete it from all assets.`, name);
+  const next = await ask({ title: `Rename tag "${name}"`, input: true, value: name, ok: "Rename",
+    message: "An existing name merges them. Leave empty to delete it from all assets." });
   if (next === null || next === name) return;
   try {
     if (next.trim() === "") {
-      if (!confirm(`Delete tag "${name}" from every asset?`)) return;
+      if (!await ask({ title: `Delete tag "${name}" from every asset?`, ok: "Delete", danger: true })) return;
       await api(`/api/tags/${encodeURIComponent(name)}`, { method: "DELETE" });
     } else {
       await api(`/api/tags/${encodeURIComponent(name)}`, { method: "PATCH", body: { new_name: next } });
@@ -553,7 +643,8 @@ async function onSourceContext(e) {
   if (!li) return;
   e.preventDefault();
   const s = state.sources.find((x) => x.id === +li.dataset.source);
-  if (!confirm(`Remove "${s.name}" from the library?\n\nTags and notes for its files are dropped. Files on disk are NOT touched.`)) return;
+  if (!await ask({ title: `Remove "${s.name}" from the library?`, ok: "Remove", danger: true,
+    message: "Tags and notes for its files are dropped. Files on disk are NOT touched." })) return;
   await api(`/api/sources/${s.id}`, { method: "DELETE" });
   await refreshSidebar();
   reload();
@@ -589,13 +680,15 @@ async function pollScan(startedScan = false) {
         await refreshSidebar();
         reload();
       }
+      const paused = s.paused ? " (paused on battery)" : "";
       if (s.thumbs.running) {
-        el.textContent = `Generating thumbnails… ${s.thumbs.done.toLocaleString()} / ${s.thumbs.total.toLocaleString()}`;
+        el.textContent = `Generating thumbnails… ${s.thumbs.done.toLocaleString()} / ${s.thumbs.total.toLocaleString()}${paused}`;
         await sleep(1500);
         continue;
       }
       if (s.analysis.running) {
-        el.textContent = `Analyzing images… ${s.analysis.done.toLocaleString()} / ${s.analysis.total.toLocaleString()}`;
+        const note = s.analysis.message ? ` — ${s.analysis.message}` : "";
+        el.textContent = `Analyzing images… ${s.analysis.done.toLocaleString()} / ${s.analysis.total.toLocaleString()}${note}${paused}`;
         analyzing = true;
         await sleep(1500);
         continue;
@@ -622,6 +715,9 @@ function bindEvents() {
     catch (e) { toast(e.message, true); }
   });
   $("#help-btn").addEventListener("click", () => $("#help-dialog").showModal());
+  $("#settings-btn").addEventListener("click", openSettings);
+  $("#settings-dialog").addEventListener("close", onSettingsClose);
+  $("#import-btn").addEventListener("click", importLibrary);
 
   $("#quick").addEventListener("click", (e) => {
     const li = e.target.closest("li");
@@ -659,7 +755,7 @@ function bindEvents() {
   $("#grid").addEventListener("click", onCardClick);
   $("#grid").addEventListener("dblclick", (e) => {
     const card = e.target.closest(".card");
-    if (card) window.open(`/api/assets/${state.items[+card.dataset.idx].id}/file`, "_blank");
+    if (card) openOriginal(state.items[+card.dataset.idx].id);
   });
   $("#grid").addEventListener("dragstart", onDragStart);
 

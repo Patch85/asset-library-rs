@@ -154,6 +154,9 @@ dialog label { display: flex; flex-direction: column; gap: 4px; }
 dialog label.check { flex-direction: row; align-items: center; gap: 8px; }
 dialog .row { display: flex; gap: 6px; }
 dialog .row input { flex: 1; }
+dialog .small, .small { font-size: 12px; margin: 0; }
+dialog .message { white-space: pre-line; margin: 0; }
+dialog h2 + p { margin-top: 0; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 6px 0 0; padding: 0; }
 table.help { border-collapse: collapse; font-size: 13px; }
 table.help td { padding: 3px 10px 3px 0; vertical-align: top; }

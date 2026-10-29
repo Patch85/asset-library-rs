@@ -16,6 +16,7 @@
     <select id="sort" title="Sort"></select>
     <input id="zoom" type="range" min="80" max="260" value="140" title="Thumbnail size">
     <button id="scan-btn">Rescan</button>
+    <button id="settings-btn" class="ghost" title="Settings">⚙</button>
     <span id="scan-status" class="muted"></span>
   </header>
 
@@ -118,7 +119,7 @@
         <tr><td>/</td><td>focus search</td></tr>
         <tr><td>F</td><td>toggle favorite on selection</td></tr>
         <tr><td>T</td><td>focus tag input</td></tr>
-        <tr><td>Drag a thumbnail</td><td>drop the original file into a folder or VTT</td></tr>
+        <tr><td>Drag a thumbnail</td><td>drop the original file (or the whole selection) into a folder or VTT</td></tr>
       </table>
       <menu><button class="primary">Close</button></menu>
     </form>
@@ -130,6 +131,41 @@
       <p class="muted">These tags are never offered as suggestions. Remove one to allow it again.</p>
       <div class="chips"></div>
       <menu><button class="primary">Close</button></menu>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog">
+    <form method="dialog">
+      <h2>Settings</h2>
+      <label class="check"><input type="checkbox" name="ai">
+        AI image search and look-alike tag suggestions</label>
+      <p class="muted small" id="ai-note">Runs a local CLIP model. The first time, it downloads about
+        600 MB. Nothing about your images leaves this computer.</p>
+      <label>Background threads <input type="number" name="threads" min="1"></label>
+      <label>AI batch size <input type="number" name="batch" min="1" max="256">
+        <span class="muted small">Smaller uses less memory; larger is a little faster.</span></label>
+      <label class="check"><input type="checkbox" name="low_priority">
+        Run background work at low priority</label>
+      <label class="check"><input type="checkbox" name="pause_on_battery">
+        Pause background work on battery power</label>
+      <h2>Import</h2>
+      <p class="muted small">Bring in a library made by the Python version of this app: pick its
+        folder (or its <code>data</code> folder). Only works while this library has no folders.</p>
+      <label>Python app folder
+        <span class="row"><input name="import_path" placeholder="e.g. C:\Users\you\dev\asset-library">
+        <button type="button" class="browse">Browse…</button>
+        <button type="button" id="import-btn">Import</button></span>
+      </label>
+      <menu><button value="cancel" formnovalidate>Cancel</button><button value="ok" class="primary">Save</button></menu>
+    </form>
+  </dialog>
+
+  <dialog id="ask-dialog">
+    <form method="dialog">
+      <h2 class="title"></h2>
+      <p class="message"></p>
+      <input name="answer" class="hidden" autocomplete="off">
+      <menu><button value="cancel" formnovalidate>Cancel</button><button value="ok" class="primary">OK</button></menu>
     </form>
   </dialog>
 
