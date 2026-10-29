@@ -3,6 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use asset_library::analysis::Analysis;
 use asset_library::api::{self, AppState};
 use asset_library::config::Config;
 use asset_library::db::Database;
@@ -29,7 +30,8 @@ async fn main() -> anyhow::Result<()> {
     let db = Arc::new(Database::open(&cfg.db_path())?);
     let scanner = Arc::new(Scanner::new(Arc::clone(&db)));
     let thumbs = Arc::new(Thumbs::new(cfg.data_dir.join("thumbs")));
-    let jobs = Arc::new(Jobs::new(Arc::clone(&db), thumbs));
+    let analysis = Arc::new(Analysis::new(Arc::clone(&db), Arc::clone(&thumbs)));
+    let jobs = Arc::new(Jobs::new(Arc::clone(&db), thumbs, analysis));
     jobs.start(); // fill in any thumbnails/analysis not done yet
     let app = api::router(Arc::new(AppState { db, scanner, jobs }));
 

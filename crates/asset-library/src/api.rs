@@ -326,9 +326,7 @@ async fn start_scan(State(s): St, Json(body): Json<ScanIn>) -> ApiResult {
 async fn scan_status(State(s): St) -> Json<Value> {
     let mut v = serde_json::to_value(s.scanner.status().clone()).unwrap_or_default();
     v["thumbs"] = serde_json::to_value(s.jobs.thumbs.status().clone()).unwrap_or_default();
-    // TODO(M4): real analysis progress.
-    v["analysis"] =
-        json!({ "running": false, "total": 0, "done": 0, "ai_available": false, "error": "" });
+    v["analysis"] = serde_json::to_value(s.jobs.analysis.status().clone()).unwrap_or_default();
     Json(v)
 }
 
