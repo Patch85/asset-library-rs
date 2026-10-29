@@ -63,7 +63,10 @@ impl SettingsStore {
 
     /// Replace the settings and save them; returns what was stored (after clamping).
     pub fn set(&self, s: Settings) -> std::io::Result<Settings> {
-        let s = s.clamp();
+        let mut s = s.clamp();
+        if self.ai_override.is_some() {
+            s.ai = self.lock().ai; // the override isn't the user's choice; don't save it
+        }
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -91,6 +94,13 @@ mod tests {
         assert!(s.ai && s.low_priority);
         assert_eq!(s.batch, 256);
         store.set(Settings { ai: false, ..s }).unwrap();
-        assert!(!SettingsStore::load(path, Settings::default()).get().ai);
+        assert!(!SettingsStore::load(path.clone(), Settings::default()).get().ai);
+
+        let mut overridden = SettingsStore::load(path.clone(), Settings::default());
+        overridden.ai_override = Some(true);
+        assert!(overridden.get().ai);
+        overridden.set(Settings { threads: 1, ..overridden.get() }).unwrap();
+        let reloaded = SettingsStore::load(path, Settings::default()).get();
+        assert!(!reloaded.ai && reloaded.threads == 1);
     }
 }
