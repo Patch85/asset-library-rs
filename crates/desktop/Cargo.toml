@@ -19,4 +19,4 @@ tauri-plugin-single-instance = "2.5.5"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net"] }
 
 [build-dependencies]
-tauri-build = "2.7.4"
+tauri-build = { version = "2.7.4", features = [] }
