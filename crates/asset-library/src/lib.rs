@@ -7,5 +7,6 @@ pub mod export;
 pub mod jobs;
 pub mod scanner;
 pub mod search;
+pub mod server;
 pub mod similarity;
 pub mod thumbs;
