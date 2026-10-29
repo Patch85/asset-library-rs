@@ -118,6 +118,16 @@ pub fn lenient_json(text: &str) -> serde_json::Result<Value> {
     serde_json::from_str(&out)
 }
 
+/// A folder or tag name as a library tag: underscores and spaces become single dashes
+/// (`Walls_and_Curbs` -> `walls-and-curbs`, `Alchemy - Glassware` -> `alchemy-glassware`).
+pub fn tag_name(raw: &str) -> String {
+    crate::db::normalize_tag(&raw.replace('_', " "))
+        .split('-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 /// A Dungeondraft tag as a library tag: leading `.` and `[XX] ` prefixes dropped; tags that
 /// only matter inside Dungeondraft are skipped.
 pub fn clean_tag(raw: &str) -> Option<String> {
@@ -127,8 +137,19 @@ pub fn clean_tag(raw: &str) -> Option<String> {
     {
         t = t[end + 1..].trim();
     }
-    let t = crate::db::normalize_tag(t);
+    let t = tag_name(t);
     (!t.is_empty() && !["colorable", "testing"].contains(&t.as_str())).then_some(t)
+}
+
+/// A pack's name for the Pack property: underscores as spaces, without a trailing version,
+/// so updates of a pack keep the same value (`FA_Assets_H_v3.07` -> `FA Assets H`).
+pub fn pack_label(name: &str) -> String {
+    static VERSION: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)[\s_-]*v\d+(\.\d+)*$").unwrap());
+    let spaced = name.replace('_', " ");
+    let trimmed = VERSION.replace(spaced.trim(), "");
+    let label = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.is_empty() { spaced.trim().to_string() } else { label }
 }
 
 pub fn open(path: &Path) -> io::Result<Pack> {
@@ -258,6 +279,12 @@ pub mod tests {
         assert_eq!(kind_value("walls"), "wall");
         assert_eq!(kind_value("terrain"), "terrain");
         assert_eq!(clean_tag("[BW] Gems & Crystals"), Some("gems-&-crystals".into()));
+        assert_eq!(clean_tag("Alchemy - Glassware Filled"), Some("alchemy-glassware-filled".into()));
+        assert_eq!(tag_name("Walls_and_Curbs"), "walls-and-curbs");
+        assert_eq!(pack_label("FA_Assets_H_v3.07"), "FA Assets H");
+        assert_eq!(pack_label("Hakupack v2"), "Hakupack");
+        assert_eq!(pack_label("[BW] Base 00 Basic"), "[BW] Base 00 Basic");
+        assert_eq!(pack_label("v2"), "v2");
         assert!(clean_tag("Testing").is_none());
         assert!(lenient_json(r#"{"a": "x,]", "b": [1,2,],}"#).is_ok());
     }

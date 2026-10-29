@@ -318,11 +318,11 @@ impl Scanner {
                 version: pack.version.clone(),
             });
             let shared =
-                Arc::new(PackShared { path: full.clone(), rel: prel.clone(), name: pack.name, mtime: mt, tags: pack.tags });
+                Arc::new(PackShared { path: full.clone(), rel: prel.clone(), name: ddpack::pack_label(&pack.name), mtime: mt, tags: pack.tags });
             let mut changed: Vec<(&Known, ddpack::Entry)> = Vec::new();
             for e in pack.entries {
                 let Some((kind, asset_type, folders)) = ddpack::classify(&e.path) else { continue };
-                let (kind, folders) = (ddpack::kind_value(kind), folders.iter().map(|f| f.to_string()).collect());
+                let (kind, folders) = (ddpack::kind_value(kind), folders.iter().map(|f| ddpack::tag_name(f)).collect());
                 let rel = format!("{prel}/{}", e.path);
                 self.status().processed += 1;
                 seen.insert(rel.clone());
