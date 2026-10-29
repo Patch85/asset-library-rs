@@ -11,17 +11,29 @@ Development happens in WSL; installers are built by GitHub Actions.
 
 ## Next up (resume here)
 
-M1–M3 are done. `PARITY_IMPL=rust` passes all 11 library parity tests; the 6 analysis tests
-need M4 (colours, filename suggestions) and M5 (CLIP).
+M1–M5 are done. `PARITY_IMPL=rust` passes all 17 parity tests, including the real-model
+text search. `cargo test` also runs golden comparisons when `fixtures/golden/` and `models/`
+are present.
+
+Setup for a fresh checkout: `python tools/fetch_onnxruntime.py` (ONNX Runtime 1.30.0 into
+`vendor/onnxruntime/lib`; debug builds find it there, release builds look next to the exe).
 
 Real-library checks (copy of the golden DB, source path rewritten to `/mnt/c/...`):
 - A rescan updated 0 of 6785 files, so Rust's `mtime` matches what Python stored.
-- The release build warmed all 6785 thumbnails in 44 s (154/s, 21 threads, through `/mnt/c`)
-  with 0 failures. The 300 golden thumbnails match in size, and pixels differ by 1.1/255 on
-  average (3.3 max).
+- The release build warmed all 6785 thumbnails in 44 s (154/s, 21 threads) with 0 failures.
+  The 300 golden thumbnails match in size; pixels differ by 1.1/255 on average (3.3 max).
+- Colours: mean L1 0.006 against Python's, dominant colour agrees for 298/300.
+- Image embeddings: cosine 0.9997 mean, 0.994 min. Text embeddings: cosine 1.0000, top-20
+  identical for all 8 queries. Suggestions: identical for all 300 sampled assets.
+- `bench` on the dev machine (22 CPUs, WSL, 300 real tokens): thumbnails 299/s, colours
+  705/s, CLIP 50/s at batch 64 with 21 threads, 24/s with 2 threads. Peak RSS 1.0–1.4 GB
+  (includes the bench holding every decoded test image).
 
-1. Start M4: port `color_profile` and `analyze_pending` (colours only) into `analysis.rs`,
-   run it after thumbnails in `Jobs::run`, replace the `analysis` stub in `scan_status`.
+Waiting on the user: send a `bench` build to the friend with the weakest machine, then
+decide on int8 and low-end defaults (batch size, threads).
+
+1. Start M6: serve `../asset-library/app/static` (copy it into the crate and embed it),
+   then `tools/diff_servers.py` to diff both servers on copies of the real DB.
 
 ## Milestones
 
@@ -32,8 +44,8 @@ Real-library checks (copy of the golden DB, source path rewritten to `/mnt/c/...
 - [x] **M2 Thumbnails and files.** Lossy WebP thumbs, parallel warmer, file serving,
       zip and copy-to-folder export.
 - [x] **M3 Search.** Query language to SQL, FTS5, tags API (rename/merge), bulk edits.
-- [ ] **M4 Colours.** Port `color_profile`; compare against golden colours.
-- [ ] **M5 CLIP.** Image/text embeddings, similarity index, `similar:` / `~"..."`, tag
+- [x] **M4 Colours.** Port `color_profile`; compare against golden colours.
+- [x] **M5 CLIP.** Image/text embeddings, similarity index, `similar:` / `~"..."`, tag
       suggestions; compare against golden embeddings and suggestions. Add an
       `asset-library bench` subcommand and send an early build to the friend with the weakest
       machine (images/sec, peak RAM) to decide on int8 and low-end defaults.
@@ -54,7 +66,10 @@ Real-library checks (copy of the golden DB, source path rewritten to `/mnt/c/...
   has started. The original briefly reports idle between sources and before thumbnailing.
 - File and folder names that aren't valid UTF-8 are skipped. The original aborted the
   whole scan on them.
-- `/api/meta` reports `ai: false` until M5.
+- ONNX Runtime is loaded at runtime from Microsoft's official build, which no longer
+  ships for Intel Macs. AI features there need a self-supplied `ORT_DYLIB_PATH`.
+- Suggestions break score ties by tag name; the original's order for ties depended on
+  Python's per-process string hashing.
 - Stored `extra` JSON is compact (`{"a":1}`), not Python's `{"a": 1}`. Both parse the same.
 
 ## Decisions log
@@ -62,3 +77,5 @@ Real-library checks (copy of the golden DB, source path rewritten to `/mnt/c/...
 - 2026-10-28: Full Rust rewrite chosen over a Python sidecar. Develop in WSL, CI for installers,
   target Windows + macOS + Linux. The benchmark moved from the Python app to the Rust port (M5)
   so friends can run it without Python.
+- 2026-10-28: ONNX Runtime is loaded dynamically (ort `load-dynamic`), pinned to 1.30.0.
+  ort's prebuilt static library needs glibc 2.38+; Microsoft's build needs 2.28.
