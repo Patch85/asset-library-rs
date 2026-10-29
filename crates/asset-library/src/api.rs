@@ -21,6 +21,7 @@ use crate::export;
 use crate::jobs::Jobs;
 use crate::scanner::{Scanner, join_rel};
 use crate::search;
+use crate::similarity;
 
 pub struct AppState {
     pub db: Arc<Database>,
@@ -45,6 +46,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/assets/{id}/reveal", post(reveal))
         .route("/api/export/folder", post(export_folder))
         .route("/api/export/zip", post(export_zip))
+        .route("/api/suggestions", post(suggestions))
+        .route("/api/suggestions/reject", post(reject_suggestion))
+        .route("/api/suggestions/ignored", get(ignored_suggestions))
+        .route("/api/suggestions/ignored/{tag}", axum::routing::delete(unignore_suggestion))
         .route("/api/tags", get(list_tags))
         .route("/api/tags/{name}", patch(rename_tag).delete(delete_tag))
         .with_state(state)
@@ -170,14 +175,14 @@ fn expand_user(p: &str) -> PathBuf {
 
 // ---------------------------------------------------------------- meta
 
-async fn meta() -> Json<Value> {
+async fn meta(State(s): St) -> Json<Value> {
     let colors: Map<String, Value> =
         COLOR_HEX.iter().map(|(k, v)| (k.to_string(), (*v).into())).collect();
     Json(json!({
         "asset_types": ASSET_TYPES,
         "sorts": search::SORTS.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
         "colors": colors,
-        "ai": false, // TODO(M5): true once CLIP is ported and ASSET_LIBRARY_AI != 0
+        "ai": s.jobs.analysis.ai_available(),
     }))
 }
 
@@ -365,23 +370,41 @@ struct ListItem {
 
 async fn list_assets(State(s): St, Query(p): Query<ListParams>) -> ApiResult {
     let parsed = search::parse(&p.q);
+    let (wh, mut params) = search::build_sql(&parsed, false);
+    let mut order = search::order_by(&p.sort);
+    let mut source = "assets a";
     if parsed.ranked() {
-        // TODO(M5): rank by CLIP similarity.
-        return Err(err(StatusCode::BAD_REQUEST, "Image search needs the AI extra (see README)"));
+        // Image search: rank in Rust, then filter/paginate in SQL in rank order.
+        let analysis = &s.jobs.analysis;
+        if !analysis.ai_available() {
+            return Err(err(StatusCode::BAD_REQUEST, "Image search needs the AI extra (see README)"));
+        }
+        let ranked = tokio::task::block_in_place(|| -> anyhow::Result<_> {
+            let idx = analysis.index.get(&s.db)?;
+            Ok(if parsed.semantic.is_empty() {
+                similarity::rank_similar(&idx, parsed.similar.unwrap_or_default(), similarity::RANKED_LIMIT)
+            } else {
+                let vec = analysis.clip.embed_text(&parsed.semantic.join(" "))?;
+                similarity::rank_by_vector(&idx, &vec, similarity::RANKED_LIMIT, None)
+            })
+        })
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, format!("Image model unavailable: {e}")))?;
+        let ids: Vec<i64> = ranked.iter().map(|r| r.0).collect();
+        params.insert(0, serde_json::to_string(&ids).unwrap_or_default().into());
+        source = "assets a JOIN json_each(?) r ON r.value = a.id";
+        order = "r.key";
     }
-    let (wh, params) = search::build_sql(&parsed, false);
-    let order = search::order_by(&p.sort);
     let limit = p.limit.clamp(1, 1000);
     let (total, items) = s.tx(|c| {
         let total: i64 = c.query_row(
-            &format!("SELECT count(*) FROM assets a WHERE {wh}"),
+            &format!("SELECT count(*) FROM {source} WHERE {wh}"),
             params_from_iter(&params),
             |r| r.get(0),
         )?;
         let mut stmt = c.prepare(&format!(
             "SELECT a.id, a.name, a.rel_path, a.asset_type, a.width, a.height, a.favorite,
                     a.has_alpha, a.missing, a.file_hash
-             FROM assets a WHERE {wh} ORDER BY {order} LIMIT ? OFFSET ?"
+             FROM {source} WHERE {wh} ORDER BY {order} LIMIT ? OFFSET ?"
         ))?;
         let all_params = params.iter().cloned().chain([limit.into(), p.offset.into()]);
         let mut items = stmt
@@ -540,6 +563,108 @@ async fn bulk_update(State(s): St, Json(body): Json<BulkIn>) -> ApiResult {
         }
         c.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM asset_tags)", [])?;
         reindex_fts(c, Some(ids))?;
+        Ok(())
+    })?;
+    ok()
+}
+
+// ---------------------------------------------------------------- suggestions
+
+#[derive(Deserialize)]
+struct SuggestIn {
+    ids: Vec<i64>,
+}
+
+#[derive(Serialize)]
+struct Merged {
+    tag: String,
+    ids: Vec<i64>,
+    count: usize,
+    score: f64,
+    source: String,
+}
+
+/// Single asset: its suggestions. Several: merged, with which assets each applies to.
+async fn suggestions(State(s): St, Json(body): Json<SuggestIn>) -> ApiResult {
+    let ids: Vec<i64> = body.ids.into_iter().take(500).collect();
+    if ids.is_empty() {
+        return Ok(Json(json!([])));
+    }
+    let per = tokio::task::block_in_place(|| {
+        let idx = s.jobs.analysis.index.get(&s.db)?;
+        similarity::suggest(&s.db, &idx, &ids, 12)
+    })?;
+    // Keyed in first-seen order, like the original's dict.
+    let mut merged: Vec<(String, Vec<i64>, f64, std::collections::BTreeSet<&str>)> = Vec::new();
+    for (aid, items) in &per {
+        for sg in items {
+            let pos = match merged.iter().position(|m| m.0 == sg.tag) {
+                Some(p) => p,
+                None => {
+                    merged.push((sg.tag.clone(), Vec::new(), 0.0, Default::default()));
+                    merged.len() - 1
+                }
+            };
+            let m = &mut merged[pos];
+            m.1.push(*aid);
+            m.2 += sg.score;
+            m.3.insert(sg.source);
+        }
+    }
+    let mut out: Vec<Merged> = merged
+        .into_iter()
+        .map(|(tag, ids, score, sources)| Merged {
+            count: ids.len(),
+            score: similarity::round_to(score / ids.len() as f64, 2),
+            source: sources.into_iter().collect::<Vec<_>>().join(" / "),
+            tag,
+            ids,
+        })
+        .collect();
+    // Single asset: best first. Several: most widely applicable first.
+    out.sort_by(|a, b| {
+        (b.count as f64 * b.score).total_cmp(&(a.count as f64 * a.score)).then_with(|| a.tag.cmp(&b.tag))
+    });
+    out.truncate(25);
+    Ok(Json(serde_json::to_value(out).unwrap_or_default()))
+}
+
+#[derive(Deserialize)]
+struct RejectIn {
+    #[serde(default)]
+    ids: Vec<i64>,
+    tag: String,
+    /// Never suggest this tag again.
+    #[serde(default)]
+    everywhere: bool,
+}
+
+async fn reject_suggestion(State(s): St, Json(body): Json<RejectIn>) -> ApiResult {
+    let tag = normalize_tag(&body.tag);
+    s.tx(|c| {
+        if body.everywhere {
+            c.execute("INSERT OR IGNORE INTO suggestion_ignore VALUES (?)", params![tag])?;
+        }
+        for id in &body.ids {
+            c.execute("INSERT OR IGNORE INTO suggestion_rejects VALUES (?, ?)", params![id, tag])?;
+        }
+        Ok(())
+    })?;
+    ok()
+}
+
+async fn ignored_suggestions(State(s): St) -> ApiResult {
+    let tags = s.tx(|c| {
+        let mut stmt = c.prepare("SELECT tag FROM suggestion_ignore ORDER BY tag")?;
+        let tags = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(tags)
+    })?;
+    Ok(Json(tags.into()))
+}
+
+async fn unignore_suggestion(State(s): St, Path(tag): Path<String>) -> ApiResult {
+    s.tx(|c| {
+        c.execute("DELETE FROM suggestion_ignore WHERE tag = ?", params![normalize_tag(&tag)])?;
         Ok(())
     })?;
     ok()

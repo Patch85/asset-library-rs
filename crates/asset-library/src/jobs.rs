@@ -29,6 +29,7 @@ impl Jobs {
 
     /// Queue a pipeline run. If one is running it will loop once more when done.
     pub fn start(self: &Arc<Self>) {
+        self.analysis.index.invalidate(); // assets may have been added/removed
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if st.active {
             st.rerun = true;

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use asset_library::analysis::Analysis;
 use asset_library::api::{self, AppState};
+use asset_library::clip::Clip;
 use asset_library::config::Config;
 use asset_library::db::Database;
 use asset_library::jobs::Jobs;
@@ -30,7 +31,8 @@ async fn main() -> anyhow::Result<()> {
     let db = Arc::new(Database::open(&cfg.db_path())?);
     let scanner = Arc::new(Scanner::new(Arc::clone(&db)));
     let thumbs = Arc::new(Thumbs::new(cfg.data_dir.join("thumbs")));
-    let analysis = Arc::new(Analysis::new(Arc::clone(&db), Arc::clone(&thumbs)));
+    let clip = Clip::new(cfg.model_dir.clone());
+    let analysis = Arc::new(Analysis::new(Arc::clone(&db), Arc::clone(&thumbs), clip, cfg.ai_enabled));
     let jobs = Arc::new(Jobs::new(Arc::clone(&db), thumbs, analysis));
     jobs.start(); // fill in any thumbnails/analysis not done yet
     let app = api::router(Arc::new(AppState { db, scanner, jobs }));

@@ -1,6 +1,7 @@
-//! Image analysis: dominant colours (always) and, from M5, CLIP embeddings. Ported from the
-//! original's `app/analysis.py`. Colours are computed from the cached thumbnail.
+//! Image analysis: dominant colours (always) and CLIP embeddings (when AI is on), from the
+//! cached thumbnails. Ported from the original's `app/analysis.py`.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
@@ -8,10 +9,10 @@ use image::DynamicImage;
 use rusqlite::params;
 use serde::Serialize;
 
+use crate::clip::{Clip, IMAGE_MODEL, to_blob};
 use crate::db::Database;
-use crate::thumbs::Thumbs;
-
-pub const IMAGE_MODEL: &str = "Qdrant/clip-ViT-B-32-vision";
+use crate::similarity::IndexCache;
+use crate::thumbs::{Thumbs, default_threads};
 
 #[derive(Clone, Default, Serialize)]
 pub struct AnalysisStatus {
@@ -25,25 +26,43 @@ pub struct AnalysisStatus {
 pub struct Analysis {
     db: Arc<Database>,
     thumbs: Arc<Thumbs>,
+    pub clip: Clip,
+    pub index: IndexCache,
     status: Mutex<AnalysisStatus>,
-    pub batch: usize,
+    ai: AtomicBool,
+    pub batch: AtomicUsize,
+    pub threads: AtomicUsize,
 }
 
 impl Analysis {
-    pub fn new(db: Arc<Database>, thumbs: Arc<Thumbs>) -> Self {
-        Self { db, thumbs, status: Mutex::default(), batch: 64 }
+    pub fn new(db: Arc<Database>, thumbs: Arc<Thumbs>, clip: Clip, ai: bool) -> Self {
+        Self {
+            db,
+            thumbs,
+            clip,
+            index: IndexCache::default(),
+            status: Mutex::new(AnalysisStatus { ai_available: ai, ..Default::default() }),
+            ai: AtomicBool::new(ai),
+            batch: AtomicUsize::new(64),
+            threads: AtomicUsize::new(default_threads()),
+        }
     }
 
     pub fn ai_available(&self) -> bool {
-        false // TODO(M5)
+        self.ai.load(Ordering::Relaxed)
+    }
+
+    pub fn set_ai(&self, on: bool) {
+        self.ai.store(on, Ordering::Relaxed);
+        self.status().ai_available = on;
     }
 
     pub fn status(&self) -> MutexGuard<'_, AnalysisStatus> {
         self.status.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Compute colours for every hash lacking them. Runs on the job thread after thumbnails;
-    /// the caller owns the `running` flag.
+    /// Compute colours and (if AI is on) embeddings for every hash lacking them. Runs on the
+    /// job thread after thumbnails; the caller owns the `running` flag.
     pub fn analyze_pending(&self) {
         let ai = self.ai_available();
         let rows: Vec<String> = self
@@ -65,31 +84,60 @@ impl Analysis {
             let mut st = self.status();
             *st = AnalysisStatus { running: st.running, total: todo.len() as u64, ai_available: ai, ..Default::default() };
         }
-        if let Err(e) = self.analyze(&todo) {
+        if todo.is_empty() {
+            return;
+        }
+        if let Err(e) = self.analyze(&todo, ai) {
+            // e.g. a database error; colours saved so far are kept
             self.status().error = e.to_string();
         }
+        self.clip.release_image_model();
+        self.index.invalidate();
     }
 
-    fn analyze(&self, hashes: &[String]) -> anyhow::Result<()> {
-        for chunk in hashes.chunks(self.batch.max(1)) {
-            let colors: Vec<Option<String>> = chunk
-                .iter()
-                .map(|h| image::open(self.thumbs.path(h)).ok().map(|im| colors_json(&color_profile(&im))))
-                .collect();
+    fn analyze(&self, hashes: &[String], mut use_ai: bool) -> anyhow::Result<()> {
+        let batch = self.batch.load(Ordering::Relaxed).max(1);
+        for (n, chunk) in hashes.chunks(batch).enumerate() {
+            let images: Vec<Option<DynamicImage>> =
+                chunk.iter().map(|h| image::open(self.thumbs.path(h)).ok()).collect();
+            let colors: Vec<Option<String>> =
+                images.iter().map(|im| im.as_ref().map(|im| colors_json(&color_profile(im)))).collect();
+            let mut vectors: Vec<Option<Vec<u8>>> = vec![None; chunk.len()];
+            if use_ai {
+                let present: Vec<usize> = (0..chunk.len()).filter(|&i| images[i].is_some()).collect();
+                let batch_imgs = present.iter().map(|&i| images[i].clone().expect("present")).collect();
+                match self.clip.embed_images(batch_imgs, self.threads.load(Ordering::Relaxed)) {
+                    Ok(vecs) => {
+                        for (&i, v) in present.iter().zip(vecs) {
+                            vectors[i] = Some(to_blob(&v));
+                        }
+                    }
+                    Err(e) => {
+                        self.status().error = format!("Image model unavailable ({e}); colours only");
+                        use_ai = false;
+                    }
+                }
+            }
             self.db.tx(|c| {
                 let mut stmt = c.prepare(
                     "INSERT INTO image_features (file_hash, colors, embedding, embed_model)
-                     VALUES (?, ?, NULL, NULL)
-                     ON CONFLICT(file_hash) DO UPDATE SET colors = excluded.colors",
+                     VALUES (?, ?, ?, ?)
+                     ON CONFLICT(file_hash) DO UPDATE SET colors = excluded.colors,
+                       embedding = coalesce(excluded.embedding, embedding),
+                       embed_model = coalesce(excluded.embed_model, embed_model)",
                 )?;
-                for (h, col) in chunk.iter().zip(&colors) {
+                for ((h, col), v) in chunk.iter().zip(&colors).zip(&vectors) {
                     if let Some(col) = col {
-                        stmt.execute(params![h, col])?;
+                        let model = v.as_ref().map(|_| IMAGE_MODEL);
+                        stmt.execute(params![h, col, v, model])?;
                     }
                 }
                 Ok::<_, rusqlite::Error>(())
             })?;
             self.status().done += chunk.len() as u64;
+            if n % 10 == 9 {
+                self.index.invalidate(); // let search use what's done so far
+            }
         }
         Ok(())
     }
