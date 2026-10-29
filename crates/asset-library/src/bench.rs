@@ -35,7 +35,7 @@ pub fn run(dir: &Path, model_dir: &Path, opts: &Options) -> anyhow::Result<()> {
     let pool = rayon::ThreadPoolBuilder::new().num_threads(opts.threads.max(1)).build()?;
     let thumbs: Vec<Vec<u8>> = pool.install(|| {
         use rayon::prelude::*;
-        files.par_iter().filter_map(|(p, _)| render(p).ok()).collect()
+        files.par_iter().filter_map(|(p, _)| render(&std::fs::read(p).ok()?).ok()).collect()
     });
     report("thumbnails", thumbs.len(), t);
 

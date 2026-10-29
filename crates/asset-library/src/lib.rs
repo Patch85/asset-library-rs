@@ -9,6 +9,7 @@ pub mod desktop;
 pub mod export;
 pub mod import;
 pub mod jobs;
+pub mod location;
 pub mod power;
 pub mod properties;
 pub mod scanner;

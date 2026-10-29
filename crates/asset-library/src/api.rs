@@ -22,7 +22,8 @@ use crate::export;
 use crate::properties::{self, FieldPatch, Invalid, NewField};
 use crate::settings::Settings;
 use crate::jobs::Jobs;
-use crate::scanner::{Scanner, join_rel};
+use crate::location::Location;
+use crate::scanner::Scanner;
 use crate::search;
 use crate::similarity;
 
@@ -191,9 +192,29 @@ fn asset_row(c: &Connection, id: i64) -> ApiResult<Map<String, Value>> {
     .ok_or_else(|| err(StatusCode::NOT_FOUND, "Asset not found"))
 }
 
-fn full_path(row: &Map<String, Value>) -> PathBuf {
-    let s = |k: &str| row[k].as_str().unwrap_or_default().to_string();
-    join_rel(FsPath::new(&s("source_path")), &s("rel_path"))
+/// Where an asset row's bytes are: a file, or an entry in a Dungeondraft pack.
+fn location(row: &Map<String, Value>) -> Location {
+    let s = |k: &str| row.get(k).and_then(Value::as_str).unwrap_or_default();
+    let n = |k: &str| row.get(k).and_then(Value::as_i64);
+    let container = row.get("container").and_then(Value::as_str);
+    Location::new(s("source_path"), s("rel_path"), container, n("entry_offset"), n("entry_size"))
+}
+
+/// The path an export writes under the source name: the rel path, with a pack's
+/// `.dungeondraft_pack` folder named after the pack file without its extension.
+fn export_rel(row: &Map<String, Value>) -> String {
+    let rel = row.get("rel_path").and_then(Value::as_str).unwrap_or_default();
+    match row.get("container").and_then(Value::as_str) {
+        Some(c) if rel.starts_with(c) => {
+            let stem = c.len() - FsPath::new(c).extension().map_or(0, |e| e.len() + 1);
+            format!("{}{}", &c[..stem], &rel[c.len()..])
+        }
+        _ => rel.to_string(),
+    }
+}
+
+fn extracted_dir(s: &AppState) -> PathBuf {
+    s.data_dir.join("extracted")
 }
 
 fn tags_for(c: &Connection, ids: &[i64]) -> rusqlite::Result<HashMap<i64, Vec<String>>> {
@@ -495,14 +516,14 @@ async fn list_assets(State(s): St, Query(p): Query<ListParams>) -> ApiResult {
 
 fn asset_json(c: &Connection, id: i64) -> ApiResult {
     let mut d = asset_row(c, id)?;
-    let path = full_path(&d);
+    let loc = location(&d);
     let extra = d.get("extra").and_then(Value::as_str).unwrap_or("{}");
     d["extra"] = serde_json::from_str(if extra.is_empty() { "{}" } else { extra }).unwrap_or_default();
     for key in ["favorite", "has_alpha", "missing"] {
         to_bool(&mut d, key);
     }
     d.insert("tags".into(), tags_for(c, &[id])?.remove(&id).unwrap_or_default().into());
-    d.insert("full_path".into(), path.to_string_lossy().into());
+    d.insert("full_path".into(), loc.display().into());
     let hash = d["file_hash"].as_str().unwrap_or_default().to_string();
     let f: Option<(Option<String>, bool)> = c
         .query_row(
@@ -870,7 +891,7 @@ fn content_disposition(name: &str) -> String {
 async fn thumb(State(s): St, Path(id): Path<i64>) -> ApiResult<Response> {
     let row = s.tx(|c| asset_row(c, id))?;
     let hash = row["file_hash"].as_str().unwrap_or_default().to_string();
-    let source = full_path(&row);
+    let source = location(&row);
     let data = tokio::task::block_in_place(|| {
         let path = s.jobs.thumbs.get(&source, &hash)?;
         Ok::<_, anyhow::Error>(std::fs::read(path)?)
@@ -890,13 +911,11 @@ struct FileParams {
 }
 
 async fn original(State(s): St, Path(id): Path<i64>, Query(q): Query<FileParams>) -> ApiResult<Response> {
-    let path = full_path(&s.tx(|c| asset_row(c, id))?);
-    let data = tokio::fs::read(&path)
-        .await
-        .map_err(|_| err(StatusCode::NOT_FOUND, "File missing on disk"))?;
-    let mut resp = ([(header::CONTENT_TYPE, mime_type(&path))], data).into_response();
+    let loc = location(&s.tx(|c| asset_row(c, id))?);
+    let data = tokio::task::block_in_place(|| loc.read()).map_err(|_| err(StatusCode::NOT_FOUND, "File missing on disk"))?;
+    let name = loc.file_name();
+    let mut resp = ([(header::CONTENT_TYPE, mime_type(FsPath::new(&name)))], data).into_response();
     if q.download {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if let Ok(v) = content_disposition(&name).parse() {
             resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
         }
@@ -930,8 +949,8 @@ pub fn reveal_in_file_manager(path: &FsPath) -> std::io::Result<()> {
 
 async fn reveal(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Path(id): Path<i64>) -> ApiResult {
     local_only(addr)?;
-    let path = full_path(&s.tx(|c| asset_row(c, id))?);
-    reveal_in_file_manager(&path).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let loc = location(&s.tx(|c| asset_row(c, id))?);
+    reveal_in_file_manager(loc.disk_path()).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     ok()
 }
 
@@ -949,10 +968,10 @@ fn export_items(s: &AppState, ids: &[i64]) -> ApiResult<Vec<export::Item>> {
     let mut items = Vec::new();
     for &id in ids {
         let row = s.tx(|c| asset_row(c, id))?;
-        let full_path = full_path(&row);
-        if full_path.exists() {
-            let text = |k: &str| row[k].as_str().unwrap_or_default().to_string();
-            items.push(export::Item { rel_path: text("rel_path"), source_name: text("source_name"), full_path });
+        let location = location(&row);
+        if location.exists() {
+            let source_name = row["source_name"].as_str().unwrap_or_default().to_string();
+            items.push(export::Item { rel_path: export_rel(&row), source_name, location });
         }
     }
     if items.is_empty() {
@@ -1043,13 +1062,16 @@ async fn start_drag(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
     let mut icon = None;
     for &id in &body.ids {
         let row = s.tx(|c| asset_row(c, id))?;
-        let path = full_path(&row);
-        if path.exists() {
+        let loc = location(&row);
+        if loc.exists() {
+            let hash = row["file_hash"].as_str().unwrap_or_default();
             if icon.is_none() {
-                let hash = row["file_hash"].as_str().unwrap_or_default();
                 icon = drag_icon(&s.jobs.thumbs.path(hash)).ok();
             }
-            files.push(path);
+            // Pack entries are extracted first: other apps need a real file to receive.
+            let file = tokio::task::block_in_place(|| loc.materialize(&extracted_dir(&s), hash))
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            files.push(file);
         }
     }
     if files.is_empty() {
@@ -1064,10 +1086,14 @@ async fn start_drag(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Js
 /// Open the original in the system's default app.
 async fn open_file(State(s): St, ConnectInfo(addr): ConnectInfo<SocketAddr>, Path(id): Path<i64>) -> ApiResult {
     local_only(addr)?;
-    let path = full_path(&s.tx(|c| asset_row(c, id))?);
-    if !path.exists() {
+    let row = s.tx(|c| asset_row(c, id))?;
+    let loc = location(&row);
+    if !loc.exists() {
         return Err(err(StatusCode::NOT_FOUND, "File missing on disk"));
     }
+    let hash = row["file_hash"].as_str().unwrap_or_default();
+    let path = tokio::task::block_in_place(|| loc.materialize(&extracted_dir(&s), hash))
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     open::that_detached(&path).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     ok()
 }

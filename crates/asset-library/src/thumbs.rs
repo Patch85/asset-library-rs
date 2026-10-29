@@ -2,7 +2,7 @@
 //! original's `app/thumbs.py`. Stored at `thumbs/<hash[:2]>/<hash>.webp`.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -13,7 +13,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::db::Database;
-use crate::scanner::join_rel;
+use crate::location::Location;
 
 pub const THUMB_SIZE: u32 = 256;
 const QUALITY: f32 = 85.0;
@@ -46,14 +46,15 @@ impl Thumbs {
     }
 
     /// The thumbnail for `source`, rendering it first if it isn't cached.
-    pub fn get(&self, source: &Path, file_hash: &str) -> anyhow::Result<PathBuf> {
+    pub fn get(&self, source: &Location, file_hash: &str) -> anyhow::Result<PathBuf> {
         let out = self.path(file_hash);
         if out.exists() {
             return Ok(out);
         }
         let dir = out.parent().context("thumbnail path has no parent")?;
         std::fs::create_dir_all(dir)?;
-        let webp = catch_unwind(AssertUnwindSafe(|| render(source)))
+        let bytes = source.read()?;
+        let webp = catch_unwind(AssertUnwindSafe(|| render(&bytes)))
             .map_err(|_| anyhow!("decoder panicked on {}", source.display()))??;
         // Unique temp name: the browser and the warmer may build the same thumb at once.
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -74,24 +75,23 @@ impl Thumbs {
     /// while background work is paused). The caller owns the `running` flag, so the
     /// pipeline can hand over to analysis without an idle gap.
     pub fn warm_all(&self, db: &Database, pool: Option<&rayon::ThreadPool>, wait: &(dyn Fn() + Sync)) {
-        let rows: Vec<(String, PathBuf)> = db
+        let rows: Vec<(String, Location)> = db
             .tx(|c| {
                 let mut stmt = c.prepare(
-                    "SELECT a.file_hash, s.path, a.rel_path FROM assets a
-                     JOIN sources s ON s.id = a.source_id
+                    "SELECT a.file_hash, s.path, a.rel_path, a.container, a.entry_offset, a.entry_size
+                     FROM assets a JOIN sources s ON s.id = a.source_id
                      WHERE a.missing = 0 ORDER BY a.name COLLATE NOCASE", // matches default sort
                 )?;
                 stmt
                     .query_map([], |r| {
-                        let root: String = r.get(1)?;
-                        let rel: String = r.get(2)?;
-                        Ok((r.get(0)?, join_rel(Path::new(&root), &rel)))
+                        let (root, rel, container): (String, String, Option<String>) = (r.get(1)?, r.get(2)?, r.get(3)?);
+                        Ok((r.get(0)?, Location::new(&root, &rel, container.as_deref(), r.get(4)?, r.get(5)?)))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()
             })
             .unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
-        let todo: Vec<(String, PathBuf)> = rows
+        let todo: Vec<(String, Location)> = rows
             .into_iter()
             .filter(|(h, _)| !self.path(h).exists() && seen.insert(h.clone()))
             .collect();
@@ -102,7 +102,7 @@ impl Thumbs {
         if todo.is_empty() {
             return;
         }
-        let one = |(hash, path): &(String, PathBuf)| {
+        let one = |(hash, path): &(String, Location)| {
             wait();
             let ok = self.get(path, hash).is_ok();
             let mut st = self.status();
@@ -123,8 +123,8 @@ pub fn default_threads() -> usize {
 
 /// Decode the first frame, apply EXIF orientation, fit within THUMB_SIZE and encode as
 /// lossy WebP, as Pillow's `thumbnail()` + `save(quality=85)` do.
-pub fn render(source: &Path) -> anyhow::Result<Vec<u8>> {
-    let mut decoder = ImageReader::open(source)?.with_guessed_format()?.into_decoder()?;
+pub fn render(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut decoder = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?.into_decoder()?;
     let orientation = decoder.orientation()?;
     let mut img = DynamicImage::from_decoder(decoder)?;
     img.apply_orientation(orientation);
@@ -187,7 +187,7 @@ mod tests {
         let src = dir.path().join("a.png");
         image::RgbaImage::from_pixel(600, 300, image::Rgba([200, 0, 0, 128])).save(&src).unwrap();
         let thumbs = Thumbs::new(dir.path().join("thumbs"));
-        let out = thumbs.get(&src, "abcdef").unwrap();
+        let out = thumbs.get(&Location::File(src), "abcdef").unwrap();
         assert!(out.ends_with("ab/abcdef.webp"));
         let img = image::open(&out).unwrap();
         assert_eq!((img.width(), img.height()), (256, 128));

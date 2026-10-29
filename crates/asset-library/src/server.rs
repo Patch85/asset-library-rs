@@ -39,6 +39,8 @@ pub fn open(cfg: &Config, opts: Options) -> anyhow::Result<Arc<AppState>> {
     let analysis = Arc::new(Analysis::new(Arc::clone(&db), Arc::clone(&thumbs), clip, settings.get().ai));
     let jobs = Arc::new(Jobs::new(Arc::clone(&db), thumbs, analysis, settings));
     jobs.start(); // fill in any thumbnails/analysis not done yet
+    let extracted = cfg.data_dir.join("extracted");
+    std::thread::spawn(move || crate::location::prune_extracted(&extracted, std::time::Duration::from_secs(7 * 86400)));
     Ok(Arc::new(AppState {
         db,
         scanner,

@@ -6,12 +6,15 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use zip::write::SimpleFileOptions;
+
+use crate::location::Location;
 use zip::{CompressionMethod, DateTime, ZipWriter};
 
 pub struct Item {
+    /// Where it lands under `source_name` when not flattened.
     pub rel_path: String,
     pub source_name: String,
-    pub full_path: PathBuf,
+    pub location: Location,
 }
 
 /// `name (n).ext` for the n-th duplicate of `name.ext`.
@@ -54,10 +57,15 @@ pub fn copy_to_folder(items: &[Item], dest_dir: &Path, flatten: bool) -> std::io
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(&item.full_path, &dest)?;
-        // Keep the modification time, like shutil.copy2.
-        if let Ok(modified) = std::fs::metadata(&item.full_path).and_then(|m| m.modified()) {
-            let _ = std::fs::File::options().write(true).open(&dest).and_then(|f| f.set_modified(modified));
+        match &item.location {
+            Location::File(src) => {
+                std::fs::copy(src, &dest)?;
+                // Keep the modification time, like shutil.copy2.
+                if let Ok(modified) = std::fs::metadata(src).and_then(|m| m.modified()) {
+                    let _ = std::fs::File::options().write(true).open(&dest).and_then(|f| f.set_modified(modified));
+                }
+            }
+            entry => std::fs::write(&dest, entry.read()?)?,
         }
         written.push(dest);
     }
@@ -76,9 +84,9 @@ pub fn build_zip(items: &[Item], flatten: bool) -> anyhow::Result<Vec<u8>> {
             n += 1;
         }
         used.insert(name.to_lowercase());
-        let data = std::fs::read(&item.full_path)?;
+        let data = item.location.read()?;
         let mut opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-        if let Some(t) = zip_time(&item.full_path) {
+        if let Some(t) = zip_time(item.location.disk_path()) {
             opts = opts.last_modified_time(t);
         }
         zf.start_file(name, opts)?;
@@ -113,7 +121,7 @@ mod tests {
         let full_path = crate::scanner::join_rel(dir, rel);
         std::fs::create_dir_all(full_path.parent().unwrap()).unwrap();
         std::fs::write(&full_path, rel).unwrap();
-        Item { rel_path: rel.into(), source_name: "src".into(), full_path }
+        Item { rel_path: rel.into(), source_name: "src".into(), location: Location::File(full_path) }
     }
 
     #[test]
