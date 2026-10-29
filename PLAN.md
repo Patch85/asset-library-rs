@@ -43,11 +43,17 @@ brings in all 6785 assets without changing the source DB.
 
 ### Waiting on the user
 
-- Send a `bench` build to the friend with the weakest machine, then decide on int8 and
-  low-end defaults (batch size, threads). Dev machine numbers are under M5 results below.
+- Bench for the friend is on hold (2026-10-28): the user first tests a local Windows
+  installer. Int8 and low-end defaults wait on that bench.
 - Confirm the app identifier `com.assetlibrary.desktop` before the first release: it names
   the per-user data dir, so changing it later strands existing libraries.
-- The icons in `crates/desktop/icons` are generated placeholders.
+- Icons in `crates/desktop/icons` are generated placeholders; the user is fine with them.
+
+### Next: local Windows installer
+
+Cross-compile an NSIS installer from WSL (`cargo tauri build --runner cargo-xwin --target
+x86_64-pc-windows-msvc`). Needs `sudo apt install -y nsis lld llvm clang` (user runs it), then
+user-space `rustup target add x86_64-pc-windows-msvc` and `cargo install tauri-cli cargo-xwin`.
 
 ### Results so far
 
