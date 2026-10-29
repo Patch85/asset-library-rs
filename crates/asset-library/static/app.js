@@ -700,6 +700,34 @@ async function pollScan(startedScan = false) {
   } finally { polling = false; }
 }
 
+// ------------------------------------------------------------------ page zoom
+
+/** Ctrl + wheel and Ctrl +/-/0 zoom the page. Browsers do this natively; the desktop app's
+ *  webview doesn't, so it's done here with CSS zoom (and remembered). */
+function bindPageZoom() {
+  const steps = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+  let level = store.get("pageZoom", 1);
+  const apply = () => { document.documentElement.style.zoom = level; store.set("pageZoom", level); };
+  const step = (dir) => {
+    const i = steps.findIndex((z) => z >= level - 1e-6);
+    level = dir === 0 ? 1 : steps[Math.max(0, Math.min(steps.length - 1, (i < 0 ? steps.length - 1 : i) + dir))];
+    apply();
+  };
+  apply();
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const dir = { "=": 1, "+": 1, "-": -1, "_": -1, "0": 0 }[e.key];
+    if (dir === undefined) return;
+    e.preventDefault();
+    step(dir);
+  });
+  document.addEventListener("wheel", (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    step(e.deltaY < 0 ? 1 : -1);
+  }, { passive: false });
+}
+
 // ------------------------------------------------------------------ init
 
 function bindEvents() {
@@ -793,6 +821,7 @@ async function init() {
   $("#zoom").value = zoom;
   document.documentElement.style.setProperty("--thumb", `${zoom}px`);
   bindEvents();
+  if (state.meta.desktop) bindPageZoom();
   await refreshSidebar();
   reload();
   const s = await api("/api/scan/status");
