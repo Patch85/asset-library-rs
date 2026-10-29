@@ -102,17 +102,16 @@ mod tests {
         let ours = tempfile::tempdir().unwrap();
         let data = py.path().join("data");
         {
-            let src = Database::open(&data.join("library.db")).unwrap();
-            src.tx(|c| {
-                c.execute_batch(
-                    "PRAGMA user_version = 0; -- what the Python app's schema looks like
-                     DROP TABLE asset_fields; DROP TABLE fields;
-                     INSERT INTO sources (path, name) VALUES ('/x', 'x');
-                     INSERT INTO assets (source_id, rel_path, file_hash, size, mtime, name)
-                       VALUES (1, 'a/b.png', 'abcd', 1, 0, 'b');
-                     INSERT INTO image_features VALUES ('abcd', '{}', x'00', 'Qdrant/clip-ViT-B-32-vision');",
-                )
-            })
+            // The Python app's schema is this app's first migration, at user_version 0.
+            std::fs::create_dir_all(&data).unwrap();
+            let src = rusqlite::Connection::open(data.join("library.db")).unwrap();
+            src.execute_batch(crate::db::SCHEMA_V1).unwrap();
+            src.execute_batch(
+                "INSERT INTO sources (path, name) VALUES ('/x', 'x');
+                 INSERT INTO assets (source_id, rel_path, file_hash, size, mtime, name)
+                   VALUES (1, 'a/b.png', 'abcd', 1, 0, 'b');
+                 INSERT INTO image_features VALUES ('abcd', '{}', x'00', 'Qdrant/clip-ViT-B-32-vision');",
+            )
             .unwrap();
         }
         std::fs::create_dir_all(data.join("thumbs/ab")).unwrap();
@@ -129,7 +128,7 @@ mod tests {
             .unwrap();
         assert_eq!(colors, None);
         assert_eq!(model, "Qdrant/clip-ViT-B-32-vision (python)");
-        assert!(version >= 2);
+        assert!(version >= 3);
         let fields: i64 = db.tx(|c| c.query_row("SELECT count(*) FROM fields", [], |r| r.get(0))).unwrap();
         assert!(fields > 0, "migration seeds default properties into an imported library");
         assert!(ours.path().join("thumbs/ab/abcd.webp").exists());

@@ -363,8 +363,14 @@ pub struct FacetValue {
 pub fn facets(c: &Connection) -> rusqlite::Result<Vec<Facet>> {
     let mut out: Vec<Facet> = Vec::new();
     let mut options: HashMap<String, Vec<String>> = HashMap::new();
+    // Keys in the order they were first defined (by any type), placed by that field's position.
     let mut fields = list_fields(c)?;
-    fields.sort_by_key(|f| (f.position, f.id));
+    fields.sort_by_key(|f| f.id);
+    let mut first: HashMap<String, (i64, i64)> = HashMap::new();
+    for f in &fields {
+        first.entry(f.key.to_lowercase()).or_insert((f.position, f.id));
+    }
+    fields.sort_by_key(|f| first[&f.key.to_lowercase()]);
     for f in fields {
         let k = f.key.to_lowercase();
         let opts = options.entry(k.clone()).or_default();
@@ -540,7 +546,7 @@ mod tests {
             let f = facets(c)?;
             let pack = f.iter().find(|f| f.key == "pack").unwrap();
             assert_eq!(pack.values[0].count, 2);
-            assert_eq!(f.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(), ["view", "grid", "size", "variant", "pack"]);
+            assert_eq!(f.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(), ["view", "grid", "kind", "size", "variant", "pack"]);
             Ok(())
         })
         .unwrap();

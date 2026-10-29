@@ -10,7 +10,7 @@ use std::sync::{Mutex, MutexGuard};
 use rusqlite::{Connection, Transaction, params, params_from_iter};
 
 /// The original's schema, verbatim. `IF NOT EXISTS` makes it a no-op on a Python library.
-const SCHEMA_V1: &str = r#"
+pub(crate) const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS sources (
     id          INTEGER PRIMARY KEY,
     path        TEXT NOT NULL UNIQUE,
@@ -108,8 +108,36 @@ INSERT INTO fields (asset_type, key, label, kind, options, position) VALUES
     ('map', 'pack', 'Pack', 'text', '[]', 2);
 "#;
 
+/// Dungeondraft packs, indexed in place (see PLAN.md, M9).
+const PACKS_V3: &str = r#"
+-- For an image inside a pack: the pack's path within the source, and where the bytes are.
+ALTER TABLE assets ADD COLUMN container TEXT;
+ALTER TABLE assets ADD COLUMN entry_offset INTEGER;
+ALTER TABLE assets ADD COLUMN entry_size INTEGER;
+
+-- Packs seen by the scanner; one is only re-read when its size or mtime changes.
+CREATE TABLE containers (
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    rel_path  TEXT NOT NULL,
+    size      INTEGER NOT NULL,
+    mtime     REAL NOT NULL,
+    name      TEXT NOT NULL,
+    author    TEXT NOT NULL DEFAULT '',
+    version   TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (source_id, rel_path)
+);
+
+INSERT OR IGNORE INTO fields (asset_type, key, label, kind, options, position) VALUES
+    ('prop', 'pack', 'Pack', 'text', '[]', 0),
+    ('tile', 'pack', 'Pack', 'text', '[]', 0),
+    ('texture', 'kind', 'Kind', 'choice', '["terrain","pattern","material"]', 0),
+    ('texture', 'pack', 'Pack', 'text', '[]', 1),
+    ('other', 'kind', 'Kind', 'choice', '["wall","path","portal","roof","light"]', 0),
+    ('other', 'pack', 'Pack', 'text', '[]', 1);
+"#;
+
 /// Migration `i` takes the database from `user_version` i to i + 1.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, PROPERTIES_V2];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, PROPERTIES_V2, PACKS_V3];
 
 /// One shared connection; like the original, every access is serialized.
 pub struct Database {
