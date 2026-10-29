@@ -70,6 +70,15 @@ impl Clip {
         self
     }
 
+    /// Whether the image model is in the cache (otherwise loading it downloads it).
+    pub fn image_model_cached(&self) -> bool {
+        self.model_dir.join("models--Qdrant--clip-ViT-B-32-vision").join("snapshots").is_dir()
+    }
+
+    pub fn image_model_loaded(&self) -> bool {
+        self.image.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+
     /// L2-normalized embeddings of images composited onto neutral gray.
     pub fn embed_images(&self, images: Vec<DynamicImage>, threads: usize) -> anyhow::Result<Vec<Vec<f32>>> {
         let mut guard = self.image.lock().unwrap_or_else(|e| e.into_inner());

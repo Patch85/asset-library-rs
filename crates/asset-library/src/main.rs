@@ -5,6 +5,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use asset_library::config::Config;
+use asset_library::settings::Settings;
 use asset_library::thumbs::default_threads;
 use asset_library::{bench, server};
 use clap::{Parser, Subcommand};
@@ -47,7 +48,9 @@ async fn main() -> anyhow::Result<()> {
         return tokio::task::block_in_place(|| bench::run(&folder, &cfg.model_dir, &opts));
     }
 
-    let state = server::open(&cfg, None)?;
+    // Like the original: AI on unless ASSET_LIBRARY_AI=0, and no throttling.
+    let defaults = Settings { ai: true, low_priority: false, pause_on_battery: false, ..Settings::default() };
+    let state = server::open(&cfg, server::Options { defaults, ..Default::default() })?;
     let host = if args.lan { Ipv4Addr::UNSPECIFIED } else { Ipv4Addr::LOCALHOST };
     let listener = tokio::net::TcpListener::bind((host, args.port)).await?;
     let url = format!("http://127.0.0.1:{}", args.port);

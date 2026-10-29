@@ -18,6 +18,7 @@ use serde_json::{Map, Value, json};
 use crate::config::{ASSET_TYPES, COLOR_HEX};
 use crate::db::{Database, get_or_create_tags, marks, normalize_tag, reindex_fts};
 use crate::export;
+use crate::settings::Settings;
 use crate::jobs::Jobs;
 use crate::scanner::{Scanner, join_rel};
 use crate::search;
@@ -51,6 +52,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/suggestions/ignored", get(ignored_suggestions))
         .route("/api/suggestions/ignored/{tag}", axum::routing::delete(unignore_suggestion))
         .route("/api/tags", get(list_tags))
+        .route("/api/settings", get(get_settings).patch(update_settings))
         .route("/api/tags/{name}", patch(rename_tag).delete(delete_tag))
         .fallback(get(static_file))
         .with_state(state)
@@ -349,6 +351,7 @@ async fn scan_status(State(s): St) -> Json<Value> {
     let mut v = serde_json::to_value(s.scanner.status().clone()).unwrap_or_default();
     v["thumbs"] = serde_json::to_value(s.jobs.thumbs.status().clone()).unwrap_or_default();
     v["analysis"] = serde_json::to_value(s.jobs.analysis.status().clone()).unwrap_or_default();
+    v["paused"] = s.jobs.paused().into(); // waiting for mains power; not in the original
     Json(v)
 }
 
@@ -906,4 +909,34 @@ async fn export_zip(State(s): St, Json(body): Json<ExportIn>) -> ApiResult<Respo
         data,
     )
         .into_response())
+}
+
+// ---------------------------------------------------------------- settings
+
+async fn get_settings(State(s): St) -> ApiResult {
+    let mut v = serde_json::to_value(s.jobs.settings.get()).unwrap_or_default();
+    v["max_threads"] = std::thread::available_parallelism().map_or(1, |n| n.get()).into();
+    v["ai_locked"] = s.jobs.settings.ai_override.is_some().into();
+    v["model_cached"] = s.jobs.analysis.clip.image_model_cached().into();
+    Ok(Json(v))
+}
+
+/// Merge the given fields into the settings, save, and apply them.
+async fn update_settings(State(s): St, Json(patch): Json<Map<String, Value>>) -> ApiResult {
+    let store = &s.jobs.settings;
+    let mut merged = serde_json::to_value(store.get()).unwrap_or_default();
+    for (k, v) in patch {
+        if merged.get(&k).is_some() {
+            merged[k] = v;
+        }
+    }
+    let new: Settings =
+        serde_json::from_value(merged).map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    let before = store.get();
+    let saved = store.set(new).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    s.jobs.analysis.set_ai(saved.ai);
+    if saved.ai && !before.ai {
+        s.jobs.start(); // embed everything, downloading the model if needed
+    }
+    get_settings(State(s)).await
 }

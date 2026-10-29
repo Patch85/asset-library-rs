@@ -21,6 +21,8 @@ pub struct AnalysisStatus {
     pub done: u64,
     pub ai_available: bool,
     pub error: String,
+    /// What's happening besides counting, e.g. a model download. Not in the original.
+    pub message: String,
 }
 
 pub struct Analysis {
@@ -63,7 +65,7 @@ impl Analysis {
 
     /// Compute colours and (if AI is on) embeddings for every hash lacking them. Runs on the
     /// job thread after thumbnails; the caller owns the `running` flag.
-    pub fn analyze_pending(&self) {
+    pub fn analyze_pending(&self, wait: &dyn Fn()) {
         let ai = self.ai_available();
         let rows: Vec<String> = self
             .db
@@ -87,7 +89,7 @@ impl Analysis {
         if todo.is_empty() {
             return;
         }
-        if let Err(e) = self.analyze(&todo, ai) {
+        if let Err(e) = self.analyze(&todo, ai, wait) {
             // e.g. a database error; colours saved so far are kept
             self.status().error = e.to_string();
         }
@@ -95,18 +97,24 @@ impl Analysis {
         self.index.invalidate();
     }
 
-    fn analyze(&self, hashes: &[String], mut use_ai: bool) -> anyhow::Result<()> {
+    fn analyze(&self, hashes: &[String], mut use_ai: bool, wait: &dyn Fn()) -> anyhow::Result<()> {
         let batch = self.batch.load(Ordering::Relaxed).max(1);
         for (n, chunk) in hashes.chunks(batch).enumerate() {
+            wait();
             let images: Vec<Option<DynamicImage>> =
                 chunk.iter().map(|h| image::open(self.thumbs.path(h)).ok()).collect();
             let colors: Vec<Option<String>> =
                 images.iter().map(|im| im.as_ref().map(|im| colors_json(&color_profile(im)))).collect();
             let mut vectors: Vec<Option<Vec<u8>>> = vec![None; chunk.len()];
             if use_ai {
+                if !self.clip.image_model_loaded() && !self.clip.image_model_cached() {
+                    self.status().message = "Downloading the AI model (about 600 MB, once)".into();
+                }
                 let present: Vec<usize> = (0..chunk.len()).filter(|&i| images[i].is_some()).collect();
                 let batch_imgs = present.iter().map(|&i| images[i].clone().expect("present")).collect();
-                match self.clip.embed_images(batch_imgs, self.threads.load(Ordering::Relaxed)) {
+                let result = self.clip.embed_images(batch_imgs, self.threads.load(Ordering::Relaxed));
+                self.status().message.clear();
+                match result {
                     Ok(vecs) => {
                         for (&i, v) in present.iter().zip(vecs) {
                             vectors[i] = Some(to_blob(&v));

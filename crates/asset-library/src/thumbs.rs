@@ -70,9 +70,10 @@ impl Thumbs {
         Ok(out)
     }
 
-    /// Generate every missing thumbnail on `threads` worker threads. The caller owns the
-    /// `running` flag, so the pipeline can hand over to analysis without an idle gap.
-    pub fn warm_all(&self, db: &Database, threads: usize) {
+    /// Generate every missing thumbnail on `pool`, calling `wait` before each one (it blocks
+    /// while background work is paused). The caller owns the `running` flag, so the
+    /// pipeline can hand over to analysis without an idle gap.
+    pub fn warm_all(&self, db: &Database, pool: Option<&rayon::ThreadPool>, wait: &(dyn Fn() + Sync)) {
         let rows: Vec<(String, PathBuf)> = db
             .tx(|c| {
                 let mut stmt = c.prepare(
@@ -103,14 +104,15 @@ impl Thumbs {
             return;
         }
         let one = |(hash, path): &(String, PathBuf)| {
+            wait();
             let ok = self.get(path, hash).is_ok();
             let mut st = self.status();
             st.failed += u64::from(!ok);
             st.done += 1;
         };
-        match rayon::ThreadPoolBuilder::new().num_threads(threads.max(1)).build() {
-            Ok(pool) => pool.install(|| todo.par_iter().for_each(one)),
-            Err(_) => todo.iter().for_each(one),
+        match pool {
+            Some(pool) => pool.install(|| todo.par_iter().for_each(one)),
+            None => todo.iter().for_each(one),
         }
     }
 }

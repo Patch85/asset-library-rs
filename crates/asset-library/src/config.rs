@@ -24,21 +24,20 @@ pub const COLOR_HEX: &[(&str, &str)] = &[
 pub struct Config {
     pub data_dir: PathBuf,
     pub model_dir: PathBuf,
-    /// `ASSET_LIBRARY_AI=0` limits analysis to colours.
-    pub ai_enabled: bool,
+    /// `ASSET_LIBRARY_AI=0|1` overrides the AI setting (0 = colours only).
+    pub ai_override: Option<bool>,
 }
 
 impl Config {
     pub fn from_env() -> Self {
-        // TODO(M7): default to the per-user data dir instead of ./data.
         let data_dir = std::env::var_os("ASSET_LIBRARY_DATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("data"));
         let model_dir = std::env::var_os("ASSET_LIBRARY_MODELS")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("models"));
-        let ai_enabled = std::env::var("ASSET_LIBRARY_AI").map_or(true, |v| v != "0");
-        Self { data_dir, model_dir, ai_enabled }
+        let ai_override = std::env::var("ASSET_LIBRARY_AI").ok().map(|v| v != "0");
+        Self { data_dir, model_dir, ai_override }
     }
 
     pub fn db_path(&self) -> PathBuf {

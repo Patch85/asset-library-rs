@@ -2,18 +2,26 @@
 //!
 //! Each step marks itself running before the previous one clears, and `start` marks the
 //! first step running before it returns, so pollers never see an idle gap mid-pipeline.
+//! Settings are read at the start of each run.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::analysis::Analysis;
 use crate::db::Database;
-use crate::thumbs::{Thumbs, default_threads};
+use crate::power::{lower_current_thread_priority, on_battery};
+use crate::settings::SettingsStore;
+use crate::thumbs::Thumbs;
 
 pub struct Jobs {
     db: Arc<Database>,
     pub thumbs: Arc<Thumbs>,
     pub analysis: Arc<Analysis>,
+    pub settings: Arc<SettingsStore>,
     state: Mutex<State>,
+    paused: AtomicBool,
+    battery: Mutex<Option<(Instant, bool)>>,
 }
 
 #[derive(Default)]
@@ -23,8 +31,21 @@ struct State {
 }
 
 impl Jobs {
-    pub fn new(db: Arc<Database>, thumbs: Arc<Thumbs>, analysis: Arc<Analysis>) -> Self {
-        Self { db, thumbs, analysis, state: Mutex::default() }
+    pub fn new(db: Arc<Database>, thumbs: Arc<Thumbs>, analysis: Arc<Analysis>, settings: Arc<SettingsStore>) -> Self {
+        Self {
+            db,
+            thumbs,
+            analysis,
+            settings,
+            state: Mutex::default(),
+            paused: AtomicBool::new(false),
+            battery: Mutex::default(),
+        }
+    }
+
+    /// Whether background work is currently waiting for mains power.
+    pub fn paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
     }
 
     /// Queue a pipeline run. If one is running it will loop once more when done.
@@ -44,11 +65,29 @@ impl Jobs {
 
     fn run(&self) {
         loop {
-            self.thumbs.warm_all(&self.db, default_threads());
+            let s = self.settings.get();
+            if s.low_priority {
+                lower_current_thread_priority();
+            }
+            self.analysis.batch.store(s.batch, Ordering::Relaxed);
+            self.analysis.threads.store(s.threads, Ordering::Relaxed);
+            let low = s.low_priority;
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(s.threads)
+                .start_handler(move |_| {
+                    if low {
+                        lower_current_thread_priority();
+                    }
+                })
+                .build()
+                .ok();
+            let wait = || self.wait_for_power();
+
+            self.thumbs.warm_all(&self.db, pool.as_ref(), &wait);
             self.analysis.status().running = true;
             self.thumbs.status().running = false;
 
-            self.analysis.analyze_pending();
+            self.analysis.analyze_pending(&wait);
 
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.rerun {
@@ -60,6 +99,28 @@ impl Jobs {
             st.active = false;
             self.analysis.status().running = false;
             return;
+        }
+    }
+
+    /// Block while on battery, if the user asked to pause then.
+    fn wait_for_power(&self) {
+        while self.settings.get().pause_on_battery && self.on_battery_cached() {
+            self.paused.store(true, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_secs(5));
+        }
+        self.paused.store(false, Ordering::Relaxed);
+    }
+
+    /// `on_battery` is a process spawn on macOS, so check at most every few seconds.
+    fn on_battery_cached(&self) -> bool {
+        let mut cache = self.battery.lock().unwrap_or_else(|e| e.into_inner());
+        match *cache {
+            Some((at, v)) if at.elapsed() < Duration::from_secs(5) => v,
+            _ => {
+                let v = on_battery();
+                *cache = Some((Instant::now(), v));
+                v
+            }
         }
     }
 }
