@@ -171,7 +171,13 @@ Plan, in order:
    are trained on, so a new untagged pack isn't taught as "none of these": stripping
    Dragon/Wyrmling's tags then suggests dragon on 36 of 36 (11 before that change).
    Property values wait for data with 2+ values per field (the user's view is all top-down).
-3. A review queue: the least certain assets for one label, confirmed or rejected by key.
+3. Done for tags: "Review" lists learned tags with how many untagged assets probably have
+   each (counted after each training), then shows one image at a time, most likely first
+   down to 20%: Y/N/S/Z for yes/no/skip/undo. Yes adds the tag; No is a rejection, which
+   now trains the model against that tag only (masked loss), and both trigger retraining.
+   Most likely first rather than least certain: quick confirmations are worth more to the
+   user than the best training examples. On the user's library: 153 tags, e.g. "human" on
+   185 untagged townsfolk tokens.
 4. Optional text description per choice value, scored against CLIP text embeddings, for
    properties with no labels yet. Measure before shipping.
 5. Simple image checks (round alpha mask, map grid size) where they prove reliable.
