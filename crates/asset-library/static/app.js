@@ -9,6 +9,7 @@ const state = {
   selected: new Set(), anchor: null,
   tags: [], sources: [], meta: { asset_types: [], sorts: [] },
   fields: [], facets: [],
+  counts: null, countsGen: 0, find: {}, expanded: new Set(),
 };
 
 // ------------------------------------------------------------------ utils
@@ -121,15 +122,79 @@ function filterState(key, value) {
 
 // ------------------------------------------------------------------ sidebar
 
+const CAP = 8; // values shown per list until "Show all"
+const FILTER_AT = 12; // lists longer than this get a filter box
+
+/** Count for a sidebar value: over the current results once /api/counts answers, else `fallback`. */
+function countOf(group, key, fallback) {
+  if (!state.counts) return fallback;
+  const g = group.startsWith("fields:") ? state.counts.fields[group.slice(7)] : state.counts[group];
+  return g?.[key] ?? 0;
+}
+
+/** A capped, filterable list. Entries: {attrs, label, n, st ("on"|"off"|""), title}. Active
+ *  entries are pinned first and always shown; the rest hide at zero results. */
+function listHtml(key, entries, noun) {
+  const f = (state.find[key] || "").trim().toLowerCase();
+  const avail = entries.filter((e) => !e.st && e.n !== 0);
+  const pinned = entries.filter((e) => e.st);
+  const rest = avail.filter((e) => !f || e.label.toLowerCase().includes(f));
+  const cap = Math.max(CAP - pinned.length, 3);
+  const all = f || state.expanded.has(key) || rest.length <= cap + 2; // "Show all" hides at least 3
+  const shown = all ? rest : rest.slice(0, cap);
+  const li = (e) => `<li ${e.attrs} class="${e.st === "on" ? "active" : e.st === "off" ? "excluded" : ""}"
+      title="${esc(e.title || "")}"><span class="label">${esc(e.label)}</span>${e.n == null ? "" : `<span class="n">${e.n.toLocaleString()}</span>`}</li>`;
+  let more = "";
+  if (!f && rest.length > shown.length) more = `<li class="more" data-more="${esc(key)}">Show all ${rest.length.toLocaleString()}</li>`;
+  else if (!f && all && rest.length > CAP) more = `<li class="more" data-more="${esc(key)}">Show fewer</li>`;
+  else if (f && !rest.length) more = `<li class="muted">No ${noun} match</li>`;
+  const box = avail.length > FILTER_AT || f
+    ? `<input type="search" class="list-filter" data-find="${esc(key)}" value="${esc(state.find[key] || "")}"
+         placeholder="Filter ${avail.length.toLocaleString()} ${noun}…" autocomplete="off">` : "";
+  return `${box}<ul class="nav">${pinned.map(li).join("")}${shown.map(li).join("")}${more}</ul>`;
+}
+
+/** Sidebar sections that hold a filter on `key:` (for the badge on a collapsed section). */
+function activeIn(prefixes) {
+  return tokens(state.q).filter((t) => prefixes.some((p) => t.replace(/^-/, "").startsWith(`${p}:`))).length;
+}
+
+function renderSections() {
+  const collapsed = new Set(store.get("collapsed", []));
+  const prefixes = {
+    library: ["is"], types: ["type"], colors: ["color"], tags: ["tag"], sources: ["source"],
+    props: state.facets.map((fc) => fc.key.toLowerCase()).concat("has"),
+  };
+  document.querySelectorAll(".sidebar [data-sec]").forEach((sec) => {
+    const key = sec.dataset.sec;
+    const closed = collapsed.has(key);
+    sec.classList.toggle("collapsed", closed);
+    const h = sec.querySelector(":scope > h3, :scope > h4");
+    const n = closed ? activeIn(prefixes[key] || [key.replace(/^prop:/, "")]) : 0;
+    let badge = h.querySelector(".badge");
+    if (!n) badge?.remove();
+    else {
+      badge ??= h.querySelector(".sec-title").insertAdjacentElement("afterend", Object.assign(document.createElement("span"), { className: "badge" }));
+      badge.textContent = n;
+      badge.title = `${n} active filter${n === 1 ? "" : "s"}`;
+    }
+  });
+}
+
 function renderSidebar() {
+  // Re-rendering replaces the list filter boxes; keep focus and caret in the one being typed in.
+  const focused = document.activeElement?.dataset?.find;
+  const caret = focused != null ? document.activeElement.selectionStart : 0;
+
   for (const li of $("#quick").children) {
     const q = li.dataset.q;
     li.classList.toggle("active", q ? tokens(state.q).includes(q) : state.q === "");
   }
 
-  $("#types").innerHTML = state.meta.asset_types.map((t) =>
-    `<li data-type="${esc(t)}" class="${filterState("type", t) ? "active" : ""}">
-       <span class="label">${esc(t)}</span></li>`).join("");
+  $("#types").innerHTML = state.meta.asset_types.map((t) => ({ t, n: countOf("types", t, null), st: filterState("type", t) }))
+    .filter((x) => x.st || x.n !== 0)
+    .map(({ t, n, st }) => `<li data-type="${esc(t)}" class="${st ? "active" : ""}">
+       <span class="label">${esc(t)}</span>${n == null ? "" : `<span class="n">${n.toLocaleString()}</span>`}</li>`).join("");
 
   $("#colors").innerHTML = Object.entries(state.meta.colors || {}).map(([c, hex]) => {
     const st = filterState("color", c);
@@ -137,23 +202,37 @@ function renderSidebar() {
               style="--c:${hex}"></button>`;
   }).join("");
 
+  // Sources stay listed at zero (they're also where folders are managed).
   $("#sources").innerHTML = state.sources.length
-    ? state.sources.map((s) =>
-      `<li data-source="${s.id}" title="${esc(s.path)}" class="${filterState("source", String(s.id)) ? "active" : ""}">
-         <span class="label">${esc(s.name)}</span><span class="n">${s.count}</span></li>`).join("")
+    ? state.sources.map((s) => {
+      const n = countOf("sources", String(s.id), s.count);
+      return `<li data-source="${s.id}" title="${esc(s.path)}" class="${filterState("source", String(s.id)) ? "active" : ""} ${n ? "" : "dim"}">
+         <span class="label">${esc(s.name)}</span><span class="n">${n.toLocaleString()}</span></li>`;
+    }).join("")
     : `<li class="muted" id="no-sources">Add a folder to begin</li>`;
 
-  const withValues = state.facets.filter((fc) => fc.values.length);
-  $("#props").innerHTML = withValues.map((fc) => `
-    <ul class="nav"><li class="group">${esc(fc.label)}</li>${fc.values.map((v) => {
-      const st = filterState(fc.key, String(v.value));
-      return `<li class="sub ${st === "on" ? "active" : st === "off" ? "excluded" : ""}" data-pkey="${esc(fc.key)}"
-                data-pval="${esc(v.value)}" title="Click: include, again: exclude, again: clear">
-                <span class="label">${esc(v.value)}</span><span class="n">${v.count}</span></li>`;
-    }).join("")}
-      <li class="sub ${tokens(state.q).includes(`-has:${fc.key}`) ? "active" : ""}" data-phas="${esc(fc.key)}"
-          title="Assets of this kind without a ${esc(fc.label)}"><span class="label muted">not set</span></li></ul>`).join("")
-    || '<p class="muted small">None set yet. Select assets to set them, or ✎ to edit.</p>';
+  const toks = tokens(state.q);
+  const props = state.facets.map((fc) => {
+    const k = fc.key.toLowerCase();
+    const entries = fc.values.map((v) => ({
+      attrs: `data-pkey="${esc(fc.key)}" data-pval="${esc(v.value)}"`,
+      label: String(v.value),
+      n: countOf(`fields:${k}`, String(v.value), v.count),
+      st: filterState(fc.key, String(v.value)),
+      title: "Click: include, again: exclude, again: clear",
+    }));
+    // Choices keep their option order; other values go most-used first.
+    if (fc.kind === "text") entries.sort((a, b) => b.n - a.n || a.label.localeCompare(b.label));
+    const notSet = toks.includes(`-has:${fc.key}`);
+    if (!notSet && !entries.some((e) => e.st || e.n)) return "";
+    return `<div class="sub-sec" data-sec="prop:${esc(k)}"><h4><span class="sec-title">${esc(fc.label)}</span></h4>
+      ${listHtml(`prop:${k}`, entries, "values")}
+      <ul class="nav"><li class="${notSet ? "active" : ""}" data-phas="${esc(fc.key)}"
+          title="Assets of this kind without a ${esc(fc.label)}"><span class="label muted">not set</span></li></ul></div>`;
+  }).join("");
+  $("#props").innerHTML = props || (state.facets.some((fc) => fc.values.length)
+    ? '<p class="muted small">None in these results.</p>'
+    : '<p class="muted small">None set yet. Select assets to set them, or ✎ to edit.</p>');
 
   document.querySelectorAll("datalist.fv").forEach((d) => d.remove());
   for (const fc of state.facets.filter((x) => x.kind === "text")) {
@@ -162,27 +241,71 @@ function renderSidebar() {
     document.body.append(d);
   }
 
-  const f = $("#tag-filter").value.trim().toLowerCase();
-  $("#tags").innerHTML = state.tags
-    .filter((t) => !f || t.name.includes(f))
-    .map((t) => {
-      const st = filterState("tag", t.name);
-      return `<li data-tag="${esc(t.name)}" class="${st === "on" ? "active" : st === "off" ? "excluded" : ""}"
-                  title="Click: include, again: exclude, again: clear. Right-click: rename/delete">
-                <span class="label">${esc(t.name)}</span><span class="n">${t.count}</span></li>`;
-    }).join("");
+  const tagEntries = state.tags.map((t) => ({
+    attrs: `data-tag="${esc(t.name)}"`, label: t.name, n: countOf("tags", t.name, t.count),
+    st: filterState("tag", t.name), title: "Click: include, again: exclude, again: clear. Right-click: rename/delete",
+  })).sort((a, b) => b.n - a.n || a.label.localeCompare(b.label));
+  $("#tags").innerHTML = state.tags.length ? listHtml("tags", tagEntries, "tags") : '<p class="muted small">No tags yet.</p>';
 
   $("#tag-datalist")?.remove();
   const dl = document.createElement("datalist");
   dl.id = "tag-datalist";
   dl.innerHTML = state.tags.map((t) => `<option value="${esc(t.name)}">`).join("");
   document.body.append(dl);
+
+  renderSections();
+  renderChips();
+  if (focused != null) {
+    const box = document.querySelector(`.list-filter[data-find="${CSS.escape(focused)}"]`);
+    box?.focus();
+    box?.setSelectionRange(caret, caret);
+  }
+}
+
+const FLAG_LABELS = { fav: "Favorites", untagged: "Untagged", missing: "Missing files", transparent: "Transparent" };
+
+/** What a query token means, for its chip. */
+function chipLabel(tok) {
+  const m = tok.match(/^(\w+):"?([^"]*)"?$/);
+  if (tok.startsWith('~"')) return ["Described as", tok.slice(2, -1)];
+  if (!m) return ["", tok];
+  const [, key, val] = m;
+  if (key === "is") return ["", FLAG_LABELS[val] || val];
+  if (key === "similar") return ["Looks like", `#${val}`];
+  if (key === "source") return ["Source", state.sources.find((s) => String(s.id) === val)?.name || val];
+  if (key === "has") return ["Has", state.facets.find((f) => f.key === val)?.label || val];
+  const fc = state.facets.find((f) => f.key.toLowerCase() === key.toLowerCase());
+  return [fc ? fc.label : key[0].toUpperCase() + key.slice(1), val];
+}
+
+function renderChips() {
+  const toks = tokens(state.q);
+  const box = $("#chips");
+  box.classList.toggle("hidden", !toks.length);
+  box.innerHTML = toks.map((tok, i) => {
+    const neg = tok.startsWith("-") && tok.length > 1;
+    const [key, val] = chipLabel(neg ? tok.slice(1) : tok);
+    return `<span class="chip ${neg ? "excluded" : ""}" title="${esc(tok)}">
+      ${neg ? '<span class="muted">not</span> ' : ""}${key ? `<span class="muted">${esc(key)}</span> ` : ""}${esc(val)}
+      <button class="x" data-drop="${i}" title="Remove">×</button></span>`;
+  }).join("") + (toks.length > 1 ? '<button class="ghost small" data-drop="all">Clear all</button>' : "");
+}
+
+async function loadCounts() {
+  const gen = ++state.countsGen;
+  try {
+    const c = await api(`/api/counts?q=${encodeURIComponent(state.q)}`);
+    if (gen === state.countsGen) { state.counts = c; renderSidebar(); }
+  } catch {
+    if (gen === state.countsGen) { state.counts = null; renderSidebar(); } // e.g. AI off: global counts
+  }
 }
 
 async function refreshSidebar() {
   [state.tags, state.sources, state.facets] =
     await Promise.all([api("/api/tags"), api("/api/sources"), api("/api/facets")]);
   renderSidebar();
+  loadCounts();
 }
 
 // ------------------------------------------------------------------ grid
@@ -196,6 +319,7 @@ function reload() {
   state.anchor = null;
   $("#grid").innerHTML = "";
   renderSidebar();
+  loadCounts();
   renderDetail();
   loadMore();
 }
@@ -986,7 +1110,39 @@ function bindEvents() {
     const b = e.target.closest("[data-color]");
     if (b) toggleFilter("color", b.dataset.color, true);
   });
-  $("#tag-filter").addEventListener("input", renderSidebar);
+  const sidebar = $(".sidebar");
+  sidebar.addEventListener("input", (e) => {
+    const key = e.target.dataset.find;
+    if (key != null) { state.find[key] = e.target.value; renderSidebar(); }
+  });
+  // Picking a value from a filtered list clears that filter (the pick stays pinned). Capture
+  // phase: the list's own click handler re-renders it.
+  sidebar.addEventListener("click", (e) => {
+    const picked = e.target.closest("li[data-tag], li[data-pkey]")?.parentElement.previousElementSibling?.dataset?.find;
+    if (picked != null) delete state.find[picked];
+  }, true);
+  sidebar.addEventListener("click", (e) => {
+    const more = e.target.closest("[data-more]");
+    if (more) {
+      const k = more.dataset.more;
+      state.expanded.has(k) ? state.expanded.delete(k) : state.expanded.add(k);
+      return renderSidebar();
+    }
+    const h = e.target.closest("h3, h4");
+    if (h && !e.target.closest("button")) {
+      const key = h.parentElement.dataset.sec;
+      const c = new Set(store.get("collapsed", []));
+      c.has(key) ? c.delete(key) : c.add(key);
+      store.set("collapsed", [...c]);
+      renderSections();
+    }
+  });
+  $("#chips").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-drop]");
+    if (!b) return;
+    const toks = tokens(state.q);
+    setQuery(b.dataset.drop === "all" ? "" : toks.filter((_, i) => i !== +b.dataset.drop).join(" "));
+  });
   $("#props").addEventListener("click", (e) => {
     const v = e.target.closest("[data-pkey]");
     if (v) return toggleFilter(v.dataset.pkey, v.dataset.pval, true);

@@ -23,6 +23,12 @@ errors, 91,405 unique thumbnails + colours in 200 s with 0 failures (864 MB of t
 87 MB database), searches 6-160 ms, facets + tags 271 ms, unchanged rescan 0.5 s. The first
 full run found reindex_fts exceeding SQLite's variable limit (fixed: id lists are chunked).
 
+Sidebar for big libraries (2026-10-29, after the 92k-image run made it hard to use): sections
+and each property collapse (remembered), lists show active values pinned plus the top 8 by
+count with "Show all", lists over 12 get their own filter box, counts follow the current search
+(`GET /api/counts?q=`, one statement, 60-220 ms on 92k) and values with no results hide, and a
+row of filter chips above the grid shows and removes each query token.
+
 M8 checks: 25 regression tests (`parity/`), unit tests in `properties.rs` and `search.rs`, a
 headless-Chromium run through the UI, and suggestions on the real library.
 

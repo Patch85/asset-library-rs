@@ -22,8 +22,8 @@
 
   <div class="layout">
     <nav class="sidebar">
-      <section>
-        <h3>Library</h3>
+      <section data-sec="library">
+        <h3><span class="sec-title">Library</span></h3>
         <ul class="nav" id="quick">
           <li data-q="">All</li>
           <li data-q="is:fav">Favorites</li>
@@ -31,30 +31,30 @@
           <li data-q="is:missing">Missing files</li>
         </ul>
       </section>
-      <section>
-        <h3>Types</h3>
+      <section data-sec="types">
+        <h3><span class="sec-title">Types</span></h3>
         <ul class="nav" id="types"></ul>
       </section>
-      <section id="props-section">
-        <h3>Properties <button id="edit-props" class="ghost small" title="Edit properties">✎</button></h3>
-        <div id="props"></div>
-      </section>
-      <section>
-        <h3>Colors</h3>
+      <section data-sec="colors">
+        <h3><span class="sec-title">Colors</span></h3>
         <div id="colors" class="swatches"></div>
       </section>
-      <section>
-        <h3>Sources <button id="add-source" class="ghost small" title="Add folder">+</button></h3>
-        <ul class="nav" id="sources"></ul>
+      <section data-sec="props" id="props-section">
+        <h3><span class="sec-title">Properties</span> <button id="edit-props" class="ghost small" title="Edit properties">✎</button></h3>
+        <div id="props"></div>
       </section>
-      <section class="grow">
-        <h3>Tags</h3>
-        <input id="tag-filter" type="search" placeholder="Filter tags…">
-        <ul class="nav tags" id="tags"></ul>
+      <section data-sec="tags">
+        <h3><span class="sec-title">Tags</span></h3>
+        <div id="tags"></div>
+      </section>
+      <section data-sec="sources">
+        <h3><span class="sec-title">Sources</span> <button id="add-source" class="ghost small" title="Add folder">+</button></h3>
+        <ul class="nav" id="sources"></ul>
       </section>
     </nav>
 
     <main id="main">
+      <div id="chips" class="filter-chips hidden"></div>
       <div class="resultbar">
         <span id="count" class="muted"></span>
         <span id="sel-count"></span>
