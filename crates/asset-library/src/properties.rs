@@ -241,7 +241,7 @@ pub fn coerce(field: &Field, raw: &Value) -> Result<Option<SqlValue>> {
     }
 }
 
-fn to_json(v: SqlValue) -> Value {
+pub(crate) fn to_json(v: SqlValue) -> Value {
     match v {
         SqlValue::Real(n) if n.fract() == 0.0 && n.abs() < 1e15 => Value::from(n as i64),
         SqlValue::Real(n) => Value::from(n),

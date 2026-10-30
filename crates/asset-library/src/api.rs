@@ -69,6 +69,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/fields", get(list_fields).post(create_field))
         .route("/api/fields/{id}", patch(update_field).delete(delete_field))
         .route("/api/facets", get(facets))
+        .route("/api/counts", get(counts))
         .fallback(get(static_file))
         .with_state(state)
 }
@@ -444,11 +445,13 @@ struct ListItem {
     fields: Map<String, Value>,
 }
 
-async fn list_assets(State(s): St, Query(p): Query<ListParams>) -> ApiResult {
+/// Parse `q` and build its WHERE clause, plus the row source and order: plain `assets a`, or
+/// for image search the ranked ids joined in rank order.
+fn search_sql(s: &AppState, q: &str, sort: &str) -> ApiResult<(String, Vec<SqlValue>, &'static str, &'static str)> {
     let keys = s.tx(|c| Ok(search::FieldKeys::new(&properties::list_fields(c)?)))?;
-    let parsed = search::parse_with(&p.q, &keys);
+    let parsed = search::parse_with(q, &keys);
     let (wh, mut params) = search::build_sql(&parsed, false);
-    let mut order = search::order_by(&p.sort);
+    let mut order = search::order_by(sort);
     let mut source = "assets a";
     if parsed.ranked() {
         // Image search: rank in Rust, then filter/paginate in SQL in rank order.
@@ -471,6 +474,11 @@ async fn list_assets(State(s): St, Query(p): Query<ListParams>) -> ApiResult {
         source = "assets a JOIN json_each(?) r ON r.value = a.id";
         order = "r.key";
     }
+    Ok((wh, params, source, order))
+}
+
+async fn list_assets(State(s): St, Query(p): Query<ListParams>) -> ApiResult {
+    let (wh, params, source, order) = search_sql(&s, &p.q, &p.sort)?;
     let limit = p.limit.clamp(1, 1000);
     let (total, items) = s.tx(|c| {
         let total: i64 = c.query_row(
@@ -1212,6 +1220,51 @@ async fn delete_field(State(s): St, Path(id): Path<i64>) -> ApiResult {
 async fn facets(State(s): St) -> ApiResult {
     let f = s.tx(|c| Ok(properties::facets(c)?))?;
     Ok(Json(serde_json::to_value(f).unwrap_or_default()))
+}
+
+#[derive(Deserialize)]
+struct CountsParams {
+    #[serde(default)]
+    q: String,
+}
+
+/// Sidebar counts over the results of `q`: types, sources, tags and property values.
+async fn counts(State(s): St, Query(p): Query<CountsParams>) -> ApiResult {
+    let (wh, params, source, _) = search_sql(&s, &p.q, "name")?;
+    let rows = s.tx(|c| {
+        let mut stmt = c.prepare(&format!(
+            "WITH hits AS MATERIALIZED (SELECT a.id, a.asset_type, a.source_id FROM {source} WHERE {wh})
+             SELECT 'type', NULL, asset_type, count(*) FROM hits GROUP BY asset_type
+             UNION ALL SELECT 'source', NULL, source_id, count(*) FROM hits GROUP BY source_id
+             UNION ALL SELECT 'tag', NULL, t.name, count(*) FROM hits h
+               JOIN asset_tags x ON x.asset_id = h.id JOIN tags t ON t.id = x.tag_id GROUP BY t.id
+             UNION ALL SELECT 'field', lower(f.key), af.value, count(*) FROM hits h
+               JOIN asset_fields af ON af.asset_id = h.id JOIN fields f ON f.id = af.field_id
+               GROUP BY lower(f.key), af.value"
+        ))?;
+        let rows = stmt
+            .query_map(params_from_iter(&params), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, SqlValue>(2)?, r.get::<_, i64>(3)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })?;
+    let mut out = json!({ "types": {}, "sources": {}, "tags": {}, "fields": {} });
+    for (kind, key, value, n) in rows {
+        let value = match properties::to_json(value) {
+            Value::String(v) => v,
+            v => v.to_string(),
+        };
+        let group = &mut out[format!("{kind}s")];
+        let group = match key {
+            Some(k) => group.as_object_mut().map(|g| g.entry(k).or_insert_with(|| json!({}))),
+            None => Some(group),
+        };
+        if let Some(g) = group {
+            g[value] = n.into();
+        }
+    }
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]

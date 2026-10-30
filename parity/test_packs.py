@@ -181,3 +181,19 @@ def test_export_every_search_result(lib):
     assert r.json()["count"] == 2
     assert sorted(p.name for p in out.rglob("*.png")) == ["Barrel_A_1x1.png", "Chair_Wood_A_1x1.png"]
     assert c.post("/api/export/zip", json={"q": '~"chair"'}).status_code == 400  # ranked search
+
+
+def test_sidebar_counts_follow_the_search(lib):
+    server, _ = lib
+    c = server.client
+    every = c.get("/api/counts").json()
+    assert every["types"] == {"prop": 2, "texture": 1, "other": 1}
+    assert every["tags"] == {"chairs": 1, "furniture": 1, "containers": 1, "nature": 1}
+    assert every["fields"] == {"pack": {"FA Test": 4}, "kind": {"terrain": 1, "wall": 1}}
+    assert list(every["sources"].values()) == [4]
+
+    props = c.get("/api/counts", params={"q": "type:prop -tag:containers"}).json()
+    assert props["types"] == {"prop": 1}
+    assert props["tags"] == {"chairs": 1, "furniture": 1}
+    assert props["fields"] == {"pack": {"FA Test": 1}}
+    assert c.get("/api/counts", params={"q": "nothing-matches-this"}).json()["tags"] == {}
