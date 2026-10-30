@@ -197,3 +197,17 @@ def test_sidebar_counts_follow_the_search(lib):
     assert props["tags"] == {"chairs": 1, "furniture": 1}
     assert props["fields"] == {"pack": {"FA Test": 1}}
     assert c.get("/api/counts", params={"q": "nothing-matches-this"}).json()["tags"] == {}
+
+
+def test_rescan_counts_every_source(lib):
+    server, root = lib
+    c = server.client
+    tokens = root.parent / "tokens"
+    tokens.mkdir()
+    for i, color in enumerate([(200, 0, 0, 255), (0, 0, 200, 255)]):
+        (tokens / f"t{i}.png").write_bytes(png(color))
+    c.post("/api/sources", json={"path": str(tokens)})
+    wait_idle(c)
+    c.post("/api/scan", json={})
+    st = wait_idle(c)
+    assert (st["processed"], st["added"], st["errors"]) == (6, 0, [])  # 4 in the pack + 2 tokens

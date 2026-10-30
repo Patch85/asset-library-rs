@@ -134,7 +134,8 @@ impl Scanner {
             if st.running {
                 return false;
             }
-            st.running = true; // claim immediately so the UI sees it
+            // Claim immediately so the UI sees it. Counts add up over all the sources.
+            *st = ScanStatus { running: true, ..Default::default() };
         }
         let this = Arc::clone(self);
         std::thread::spawn(move || {
@@ -151,7 +152,6 @@ impl Scanner {
 
     fn scan_source(&self, source_id: i64) {
         let _guard = self.scan_lock.lock().unwrap_or_else(|e| e.into_inner());
-        *self.status() = ScanStatus { running: true, ..Default::default() };
         if let Err(e) = self.scan(source_id) {
             self.status().errors.push(e.to_string()); // surface to the UI
         }
