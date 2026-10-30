@@ -1083,6 +1083,132 @@ async function pollScan(startedScan = false) {
   } finally { polling = false; }
 }
 
+// ------------------------------------------------------------------ review queue
+
+/** One learned tag at a time: untagged images that probably have it, most likely first.
+ *  Yes adds the tag, No rejects the suggestion (both retrain the model), Skip moves on. */
+const review = { tags: [], tag: null, type: null, items: [], pos: 0, history: [], changed: false };
+
+async function openReview() {
+  const dlg = $("#review-dialog");
+  $(".review-pick", dlg).classList.remove("hidden");
+  $(".review-run", dlg).classList.add("hidden");
+  $(".review-filter", dlg).value = "";
+  if (!dlg.open) dlg.showModal();
+  $(".review-tags", dlg).innerHTML = '<li class="muted">Loading…</li>';
+  try { review.tags = await api("/api/review"); } catch (e) { return toast(e.message, true); }
+  renderReviewTags();
+  $(".review-filter", dlg).focus();
+}
+
+function renderReviewTags() {
+  const dlg = $("#review-dialog");
+  const f = $(".review-filter", dlg).value.trim().toLowerCase();
+  const multi = new Set(review.tags.map((t) => t.asset_type)).size > 1;
+  const list = review.tags.filter((t) => !f || t.tag.includes(f));
+  $(".review-tags", dlg).innerHTML = list.map((t) =>
+    `<li data-tag="${esc(t.tag)}" data-type="${esc(t.asset_type)}"><span class="label">${esc(t.tag)}${
+      multi ? `<span class="type">${esc(t.asset_type)}</span>` : ""}</span><span class="n">${t.likely.toLocaleString()} likely</span></li>`).join("")
+    || `<li class="muted">${review.tags.length ? "No tags match" : "Nothing to review yet. Tag some images (15+ per tag, in 2+ folders) and the app learns from them."}</li>`;
+}
+
+async function startReview(tag, type) {
+  Object.assign(review, { tag, type, items: [], pos: 0, history: [] });
+  const dlg = $("#review-dialog");
+  $(".review-pick", dlg).classList.add("hidden");
+  $(".review-run", dlg).classList.remove("hidden");
+  $(".review-title", dlg).textContent = `Is this "${tag}"?`;
+  try {
+    review.items = await api(`/api/review/${encodeURIComponent(type)}/${encodeURIComponent(tag)}?limit=200`);
+  } catch (e) { return toast(e.message, true); }
+  showReviewItem();
+}
+
+function showReviewItem() {
+  const dlg = $("#review-dialog");
+  const it = review.items[review.pos];
+  const stage = $(".review-stage", dlg);
+  stage.classList.remove("yes", "no");
+  const decided = review.history.filter((h) => h.action !== "skip");
+  const yes = decided.filter((h) => h.action === "yes").length;
+  $(".review-progress", dlg).textContent =
+    `${Math.min(review.pos + 1, review.items.length)} of ${review.items.length} · ${yes} yes · ${decided.length - yes} no`;
+  ["yes", "no", "skip"].forEach((k) => { $(`.review-${k}`, dlg).disabled = !it; });
+  $(".review-undo", dlg).disabled = !review.history.length;
+  if (!it) {
+    $("img", stage).removeAttribute("src");
+    $(".review-caption", dlg).textContent = review.items.length
+      ? "Done with this batch. Back to the tags for more (the model has learned from your answers)."
+      : "Nothing left to review for this tag.";
+    $(".review-next", dlg).innerHTML = "";
+    return;
+  }
+  // The thumbnail at once, the original when it has loaded (it may be large, or unreadable).
+  const img = $("img", stage);
+  img.src = `/api/assets/${it.id}/thumb`;
+  const full = new Image();
+  full.onload = () => { if (review.items[review.pos] === it) img.src = full.src; };
+  full.src = `/api/assets/${it.id}/file`;
+  $(".review-caption", dlg).textContent = `${it.rel_path}  ·  ${Math.round(it.score * 100)}% likely`;
+  $(".review-next", dlg).innerHTML = review.items.slice(review.pos + 1, review.pos + 7)
+    .map((n) => `<img src="/api/assets/${n.id}/thumb" alt="">`).join("");
+}
+
+async function reviewAnswer(action) {
+  const it = review.items[review.pos];
+  if (!it) return;
+  const stage = $("#review-dialog .review-stage");
+  try {
+    if (action === "yes") await api("/api/assets/bulk", { method: "POST", body: { ids: [it.id], add_tags: [review.tag] } });
+    if (action === "no") await api("/api/suggestions/reject", { method: "POST", body: { ids: [it.id], tag: review.tag } });
+  } catch (e) { return toast(e.message, true); }
+  if (action !== "skip") { review.changed = true; stage.classList.add(action); }
+  review.history.push({ pos: review.pos, action, id: it.id });
+  review.pos++;
+  setTimeout(showReviewItem, action === "skip" ? 0 : 120);
+}
+
+async function reviewUndo() {
+  const last = review.history.pop();
+  if (!last) return;
+  try {
+    if (last.action === "yes") await api("/api/assets/bulk", { method: "POST", body: { ids: [last.id], remove_tags: [review.tag] } });
+    if (last.action === "no") await api("/api/suggestions/reject", { method: "POST", body: { ids: [last.id], tag: review.tag, undo: true } });
+  } catch (e) { review.history.push(last); return toast(e.message, true); }
+  review.pos = last.pos;
+  showReviewItem();
+}
+
+function bindReview() {
+  const dlg = $("#review-dialog");
+  $("#review-btn").addEventListener("click", openReview);
+  $(".review-filter", dlg).addEventListener("input", renderReviewTags);
+  $(".review-tags", dlg).addEventListener("click", (e) => {
+    const li = e.target.closest("[data-tag]");
+    if (li) startReview(li.dataset.tag, li.dataset.type);
+  });
+  $(".review-close", dlg).addEventListener("click", () => dlg.close());
+  $(".review-back", dlg).addEventListener("click", openReview);
+  $(".review-yes", dlg).addEventListener("click", () => reviewAnswer("yes"));
+  $(".review-no", dlg).addEventListener("click", () => reviewAnswer("no"));
+  $(".review-skip", dlg).addEventListener("click", () => reviewAnswer("skip"));
+  $(".review-undo", dlg).addEventListener("click", reviewUndo);
+  // On the document: after a tag is picked, focus may be on the page behind the dialog.
+  document.addEventListener("keydown", (e) => {
+    if (!dlg.open || $(".review-run", dlg).classList.contains("hidden") || e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    const act = { y: "yes", arrowright: "yes", n: "no", arrowleft: "no", s: "skip", arrowdown: "skip" }[k];
+    if (act) { e.preventDefault(); reviewAnswer(act); }
+    else if (k === "z" || k === "backspace") { e.preventDefault(); reviewUndo(); }
+  });
+  dlg.addEventListener("close", async () => {
+    if (!review.changed) return;
+    review.changed = false;
+    await refreshSidebar();
+    reload();
+  });
+}
+
 // ------------------------------------------------------------------ magnifier
 
 /** Hover a thumbnail and tap Ctrl twice: a large preview opens on the other half of the window
@@ -1316,6 +1442,7 @@ async function init() {
   document.documentElement.style.setProperty("--thumb", `${zoom}px`);
   bindEvents();
   bindPeek();
+  bindReview();
   if (state.meta.desktop) { bindPageZoom(); bindContextMenu(); }
   await refreshSidebar();
   reload();

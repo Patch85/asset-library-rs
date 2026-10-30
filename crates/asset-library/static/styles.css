@@ -224,3 +224,18 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
   border-radius: 6px;
 }
 .peek .cap { color: var(--muted); font-size: 12px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* review queue */
+#review-dialog > div { display: flex; flex-direction: column; gap: 10px; }
+#review-dialog .review-tags { max-height: 55vh; overflow-y: auto; }
+#review-dialog .review-tags .type { color: var(--muted); font-size: 11px; margin-left: 6px; }
+#review-dialog .review-stage {
+  height: min(52vh, 520px); display: flex; align-items: center; justify-content: center; border-radius: 8px;
+  background: repeating-conic-gradient(var(--check-a) 0 25%, var(--check-b) 0 50%) 0 0 / 20px 20px;
+}
+#review-dialog .review-stage img { max-width: 100%; max-height: 100%; object-fit: contain; }
+#review-dialog .review-stage.yes { outline: 3px solid var(--accent); }
+#review-dialog .review-stage.no { outline: 3px solid var(--danger); }
+#review-dialog .review-caption { text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#review-dialog .review-next { display: flex; gap: 6px; justify-content: center; min-height: 56px; }
+#review-dialog .review-next img { width: 56px; height: 56px; object-fit: contain; opacity: .6; border-radius: 4px; background: var(--panel-2); }

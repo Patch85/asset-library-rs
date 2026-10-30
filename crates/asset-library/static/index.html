@@ -15,6 +15,7 @@
     </div>
     <select id="sort" title="Sort"></select>
     <input id="zoom" type="range" min="80" max="260" value="140" title="Thumbnail size">
+    <button id="review-btn" title="Confirm or reject likely tags, one image at a time">Review</button>
     <button id="scan-btn">Rescan</button>
     <button id="settings-btn" class="ghost" title="Settings">⚙</button>
     <span id="scan-status" class="muted"></span>
@@ -126,6 +127,7 @@
       <table class="help">
         <tr><td>Click / Ctrl-click / Shift-click</td><td>select / toggle / range</td></tr>
         <tr><td>Ctrl+A, Esc</td><td>select all loaded / clear</td></tr>
+        <tr><td>Review: Y / N / S / Z</td><td>yes / no / skip / undo (or → ← ↓)</td></tr>
         <tr><td>Hover + Ctrl Ctrl</td><td>magnify the thumbnail under the pointer (again, Esc or click to close)</td></tr>
         <tr><td>/</td><td>focus search</td></tr>
         <tr><td>F</td><td>toggle favorite on selection</td></tr>
@@ -202,6 +204,31 @@
       </label>
       <menu><button value="delete" class="danger">Delete tag</button><span class="grow"></span><button value="cancel" formnovalidate>Cancel</button></menu>
     </form>
+  </dialog>
+
+  <dialog id="review-dialog" class="wide">
+    <div class="review-pick">
+      <h2>Review likely tags</h2>
+      <p class="muted small">The app learns tags from images you've tagged. Pick a tag to go through
+        untagged images that probably have it, most likely first. Your answers teach it.</p>
+      <input type="search" class="review-filter" placeholder="Filter tags…" autocomplete="off">
+      <ul class="nav review-tags"></ul>
+      <menu><button class="primary review-close">Close</button></menu>
+    </div>
+    <div class="review-run hidden">
+      <h2><span class="review-title"></span> <span class="muted small review-progress"></span></h2>
+      <div class="review-stage"><img alt=""></div>
+      <div class="review-caption muted small"></div>
+      <div class="review-next"></div>
+      <menu>
+        <button class="review-back">← Tags</button>
+        <span class="grow"></span>
+        <button class="review-undo" title="Z">Undo</button>
+        <button class="review-skip" title="S or ↓">Skip</button>
+        <button class="review-no danger" title="N or ←">No</button>
+        <button class="review-yes primary" title="Y or →">Yes</button>
+      </menu>
+    </div>
   </dialog>
 
   <dialog id="ask-dialog">
