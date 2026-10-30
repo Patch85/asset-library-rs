@@ -209,3 +209,18 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
   .detail { position: fixed; inset: auto 0 0 0; width: auto; max-height: 60vh; border-left: none; border-top: 1px solid var(--border); }
   #zoom, .brand { display: none; }
 }
+
+/* magnifier: the half of the window away from the pointer; lets the mouse through */
+.peek {
+  position: fixed; top: 60px; bottom: 12px; right: 12px; width: calc(50vw - 24px); z-index: 50;
+  pointer-events: none; display: flex; flex-direction: column; gap: 6px; padding: 10px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .6);
+}
+.peek.left { right: auto; left: 12px; }
+.peek img {
+  flex: 1; min-height: 0; width: 100%; object-fit: contain; image-rendering: auto;
+  background: repeating-conic-gradient(var(--check-a) 0 25%, var(--check-b) 0 50%) 0 0 / 20px 20px;
+  border-radius: 6px;
+}
+.peek .cap { color: var(--muted); font-size: 12px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

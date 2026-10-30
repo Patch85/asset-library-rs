@@ -1039,6 +1039,56 @@ async function pollScan(startedScan = false) {
   } finally { polling = false; }
 }
 
+// ------------------------------------------------------------------ magnifier
+
+/** Hover a thumbnail and tap Ctrl twice: a large preview opens on the other half of the window
+ *  and follows the hovered thumbnail. Ctrl twice again, Esc, or a click closes it. */
+const peek = { open: false, idx: null, lastCtrl: 0, x: 0 };
+
+function showPeek() {
+  const it = state.items[peek.idx];
+  const el = $("#peek");
+  if (!it) return;
+  el.classList.toggle("left", peek.x > window.innerWidth / 2);
+  if (el.dataset.id !== String(it.id)) {
+    el.dataset.id = it.id;
+    $("img", el).src = `/api/assets/${it.id}/file`;
+    $(".cap", el).textContent = `${it.name}${it.width ? `  ${it.width}×${it.height}` : ""}`;
+  }
+  el.classList.remove("hidden");
+  peek.open = true;
+}
+
+function closePeek() {
+  peek.open = false;
+  $("#peek").classList.add("hidden");
+}
+
+function bindPeek() {
+  $("#grid").addEventListener("mouseover", (e) => {
+    const card = e.target.closest(".card");
+    peek.idx = card ? +card.dataset.idx : null;
+    if (peek.open && card) showPeek();
+  });
+  $("#grid").addEventListener("mouseleave", () => { peek.idx = null; });
+  document.addEventListener("mousemove", (e) => { peek.x = e.clientX; }, { passive: true });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Control") { peek.lastCtrl = 0; return; } // Ctrl+anything isn't a double tap
+    if (e.repeat) return;
+    const now = performance.now();
+    if (now - peek.lastCtrl < 400) {
+      peek.lastCtrl = 0;
+      if (peek.open) closePeek();
+      else if (peek.idx != null) showPeek();
+    } else peek.lastCtrl = now;
+  });
+  document.addEventListener("keydown", (e) => {
+    if (peek.open && e.key === "Escape") { e.stopImmediatePropagation(); closePeek(); }
+  }, true);
+  document.addEventListener("mousedown", () => { if (peek.open) closePeek(); }, true);
+  $("#main").addEventListener("scroll", () => { if (peek.open && peek.idx == null) closePeek(); }, { passive: true });
+}
+
 // ------------------------------------------------------------------ page zoom
 
 /** Ctrl + wheel and Ctrl +/-/0 zoom the page. Browsers do this natively; the desktop app's
@@ -1206,6 +1256,7 @@ async function init() {
   $("#zoom").value = zoom;
   document.documentElement.style.setProperty("--thumb", `${zoom}px`);
   bindEvents();
+  bindPeek();
   if (state.meta.desktop) bindPageZoom();
   await refreshSidebar();
   reload();
