@@ -137,6 +137,39 @@ in-pack folders both become tags; packs get the same background analysis as ever
 - Export (copy/zip) writes entry bytes out under `<pack name>/<inner path>`, and can export
   every result of the current search, not just loaded/selected cards.
 
+## M11 design: smarter suggestions
+
+Measured 2026-10-29 on a copy of the user's library (6,785 tokens, 344 tags, 140 tokens with
+`view:top-down`), with `tools/eval_tags.py`: whole subfolders held out, tags guessed from the
+image alone.
+
+| method | top-1 right | right tag in top 3 | shown suggestions right |
+|---|---|---|---|
+| look-alike vote (now) | 41.8% | 56.7% | 35% (1.1 per token) |
+| per-tag logistic regression | 48.4% | 61.5% | 58% (0.5 per token) |
+
+Tags come from folder names and are incomplete, so these are lower bounds. Training takes about
+1 s for all 43 tags. Findings:
+
+- 97% of token tags come from folder or file names, which suggestions already use. Image
+  recognition only matters for packs with uninformative names.
+- Almost every token in the library is top-down, not just the 140 marked (all of Aberration).
+  A classifier trained on those 140 would learn "looks like an Aberration". View suits a
+  folder-wide default and a "set on all results" action, not recognition. Recognising view in
+  mixed packs needs examples of other views, or text descriptions per choice (untested).
+- Filenames carry size (`Giant_Coral_Snake_Large_...`), which filename suggestions already use.
+
+Plan, in order:
+1. "Set on all N results" for properties and tags (today bulk edits cover loaded items only).
+2. Per-tag and per-property-value logistic classifiers on stored embeddings, per asset type,
+   retrained in the background after edits, replacing the look-alike vote where a label has
+   enough examples (vote stays for rare ones). Rejections count as negatives.
+3. A review queue: the least certain assets for one label, confirmed or rejected by key.
+4. Optional text description per choice value, scored against CLIP text embeddings, for
+   properties with no labels yet. Measure before shipping.
+5. Simple image checks (round alpha mask, map grid size) where they prove reliable.
+A bigger model (CLIP ViT-L, SigLIP) waits until these are measured.
+
 ## Milestones
 
 - [x] **M0 Harness.** Black-box parity suite (`parity/`) passing against the Python original;
@@ -160,6 +193,8 @@ in-pack folders both become tags; packs get the same background analysis as ever
 - [ ] **M8 Properties.** Editable per-type fields with search, facets, bulk edit, suggestions
       and tag-to-property moves (design above).
 - [ ] **M9 Dungeondraft packs.** Index `.dungeondraft_pack` contents in place (design above).
+- [ ] **M11 Smarter suggestions.** Classifiers on the user's own labels, bulk set on all
+      results, review queue (design above).
 - [ ] **M10 Release.** tauri-action matrix (Win/macOS/Linux), updater signing key, GitHub
       Releases, in-app "new version" prompt.
 
