@@ -162,9 +162,15 @@ Tags come from folder names and are incomplete, so these are lower bounds. Train
 Plan, in order:
 1. Done: "Select all N results" after Ctrl+A; every bulk edit then applies to the whole
    search (`POST /api/assets/bulk` with `q`), after a confirmation. 7,864 tags in 0.5 s.
-2. Per-tag and per-property-value logistic classifiers on stored embeddings, per asset type,
-   retrained in the background after edits, replacing the look-alike vote where a label has
-   enough examples (vote stays for rare ones). Rejections count as negatives.
+2. Done for tags (`classifier.rs`): per asset type, logistic regression for tags with 15+
+   examples in 2+ folders (at most 150 tags, 12,000 images), 100 gradient steps. Retrained
+   3 s after edits or analysis, at low priority, only for types whose tags changed: on the
+   user's library tokens 1.2 s, props 4.4 s. It replaces the look-alike vote for those tags
+   (source "image"); the vote covers rarer ones. With these settings, held-out subfolders:
+   top-1 right 48% vs 39%, shown suggestions right 56% vs 32%. Only assets with a learned tag
+   are trained on, so a new untagged pack isn't taught as "none of these": stripping
+   Dragon/Wyrmling's tags then suggests dragon on 36 of 36 (11 before that change).
+   Property values wait for data with 2+ values per field (the user's view is all top-down).
 3. A review queue: the least certain assets for one label, confirmed or rejected by key.
 4. Optional text description per choice value, scored against CLIP text embeddings, for
    properties with no labels yet. Measure before shipping.
