@@ -84,11 +84,28 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// The app identifier before release builds (io.github.patch85.asset-library); test installs
+/// kept their library in a data dir named after it.
+const OLD_IDENTIFIER: &str = "com.assetlibrary.desktop";
+
+/// Move a library from the old identifier's data dir, once, if the new one doesn't exist yet.
+/// Both live in the same parent folder on every OS, so a rename is enough.
+fn adopt_old_data_dir(data_dir: &std::path::Path) {
+    let Some(old) = data_dir.parent().map(|p| p.join(OLD_IDENTIFIER)) else { return };
+    if old.is_dir()
+        && !data_dir.exists()
+        && let Err(e) = std::fs::rename(&old, data_dir)
+    {
+        eprintln!("couldn't move {} to {}: {e}", old.display(), data_dir.display());
+    }
+}
+
 /// Data in the per-user app data dir unless `ASSET_LIBRARY_DATA` says otherwise.
 fn config(app: &AppHandle) -> anyhow::Result<Config> {
     let mut cfg = Config::from_env();
     if std::env::var_os("ASSET_LIBRARY_DATA").is_none() {
         cfg.data_dir = app.path().app_data_dir()?;
+        adopt_old_data_dir(&cfg.data_dir);
         if std::env::var_os("ASSET_LIBRARY_MODELS").is_none() {
             cfg.model_dir = cfg.data_dir.join("models");
         }
@@ -207,4 +224,26 @@ fn main() {
         }
         let _ = (app, event);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moves_the_old_data_dir_once() {
+        let parent = tempfile::tempdir().unwrap();
+        let (old, new) = (parent.path().join(OLD_IDENTIFIER), parent.path().join("io.github.patch85.asset-library"));
+        std::fs::create_dir_all(old.join("thumbs")).unwrap();
+        std::fs::write(old.join("library.db"), b"db").unwrap();
+        adopt_old_data_dir(&new);
+        assert!(!old.exists() && std::fs::read(new.join("library.db")).unwrap() == b"db");
+
+        // An existing new library is never replaced.
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("library.db"), b"stale").unwrap();
+        adopt_old_data_dir(&new);
+        assert_eq!(std::fs::read(new.join("library.db")).unwrap(), b"db");
+        assert!(old.exists());
+    }
 }

@@ -39,8 +39,9 @@ ASSET_LIBRARY_DATA=/tmp/al-desktop ASSET_LIBRARY_MODELS=$PWD/models \
   cargo run -p asset-library-desktop                     # scratch library, reuse models/
 ```
 
-- Data lives in `~/.local/share/com.assetlibrary.desktop` (Linux),
-  `%APPDATA%\com.assetlibrary.desktop` (Windows), `~/Library/Application Support/...` (macOS).
+- Data lives in `~/.local/share/io.github.patch85.asset-library` (Linux),
+  `%APPDATA%\io.github.patch85.asset-library` (Windows), `~/Library/Application Support/...`
+  (macOS). A library in the old `com.assetlibrary.desktop` folder is moved there on first launch.
 - WSL limitations: no tray (no session D-Bus, so closing the window quits), and drags can't
   cross from WSLg windows into Windows Explorer. On WSL the app forces software GL; without
   it WebKitGTK loads nothing. Tray, drag-out to Explorer and importing the real (Windows-path)
@@ -55,8 +56,6 @@ brings in all 6785 assets without changing the source DB.
 
 - Bench for the friend is on hold (2026-10-28): the user first tests a local Windows
   installer. Int8 and low-end defaults wait on that bench.
-- Confirm the app identifier `com.assetlibrary.desktop` before the first release: it names
-  the per-user data dir, so changing it later strands existing libraries.
 - Icons in `crates/desktop/icons` are generated placeholders; the user is fine with them.
 
 ### Local Windows installer
@@ -198,3 +197,6 @@ in-pack folders both become tags; packs get the same background analysis as ever
 - 2026-10-28: Properties (M8) come before the release, with user-editable field definitions.
 - 2026-10-29: Dungeondraft packs (M9) are indexed in place before the release; their tags and
   in-pack folders become tags.
+- 2026-10-29: App identifier `io.github.patch85.asset-library` (repo github.com/Patch85/
+  asset-library-rs). It names the per-user data dir, so it must not change after release.
+  Test installs' `com.assetlibrary.desktop` data dir is moved to the new one on first launch.
