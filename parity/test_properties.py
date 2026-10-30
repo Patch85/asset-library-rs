@@ -140,3 +140,12 @@ def test_same_size_suggestion(make_server, tmp_path):
     client.post("/api/assets/bulk", json={"ids": labelled, "set_fields": {"size": "large"}})
     s = suggestions(client, i["mystery"])
     assert s["size"]["value"] == "large" and s["size"]["source"] == "same size"
+
+
+def test_bulk_edit_every_result(lib):
+    r = lib.post("/api/assets/bulk", json={"q": "tag:undead", "set_fields": {"view": "top-down"}, "add_tags": ["horde"]})
+    assert r.json() == {"ok": True, "count": 3}
+    assert names(search(lib, "view:top-down tag:horde")) == ["Ghoul", "Skeleton Medium", "Zombie Large 01"]
+    assert lib.post("/api/assets/bulk", json={"q": "nothing-matches", "favorite": True}).json()["count"] == 0
+    assert lib.post("/api/assets/bulk", json={"q": '~"zombie"', "favorite": True}).status_code == 400
+    assert search(lib, "is:fav")["total"] == 0

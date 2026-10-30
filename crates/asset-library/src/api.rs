@@ -615,7 +615,10 @@ async fn update_asset(State(s): St, Path(id): Path<i64>, Json(body): Json<AssetP
 
 #[derive(Deserialize)]
 struct BulkIn {
+    #[serde(default)]
     ids: Vec<i64>,
+    /// Edit every result of this search instead of `ids`.
+    q: Option<String>,
     #[serde(default)]
     add_tags: Vec<String>,
     #[serde(default)]
@@ -628,9 +631,12 @@ struct BulkIn {
 }
 
 async fn bulk_update(State(s): St, Json(body): Json<BulkIn>) -> ApiResult {
-    let ids = &body.ids;
+    let ids = &match &body.q {
+        Some(q) => query_ids(&s, q, "Editing every result doesn't work with image search; select them instead")?,
+        None => body.ids.clone(),
+    };
     if ids.is_empty() {
-        return ok();
+        return Ok(Json(json!({ "ok": true, "count": 0 })));
     }
     s.tx(|c| -> ApiResult<()> {
         for tid in get_or_create_tags(c, &body.add_tags)? {
@@ -675,7 +681,7 @@ async fn bulk_update(State(s): St, Json(body): Json<BulkIn>) -> ApiResult {
         reindex_fts(c, Some(ids))?;
         Ok(())
     })?;
-    ok()
+    Ok(Json(json!({ "ok": true, "count": ids.len() })))
 }
 
 // ---------------------------------------------------------------- suggestions
@@ -985,11 +991,19 @@ const MAX_ZIP_DOWNLOAD: i64 = 1 << 30;
 
 /// The ids an export covers: `ids`, or every result of `q` (in name order).
 fn export_ids(s: &AppState, body: &ExportIn) -> ApiResult<Vec<i64>> {
-    let Some(q) = &body.q else { return Ok(body.ids.clone()) };
+    match &body.q {
+        Some(q) => query_ids(s, q, "Exporting every result doesn't work with image search; select them instead"),
+        None => Ok(body.ids.clone()),
+    }
+}
+
+/// Every result of `q`, in name order. Image searches are refused with `ranked_msg` (their
+/// results are a cut-off, best-first list that's all on screen anyway).
+fn query_ids(s: &AppState, q: &str, ranked_msg: &str) -> ApiResult<Vec<i64>> {
     s.tx(|c| {
         let parsed = search::parse_with(q, &search::FieldKeys::new(&properties::list_fields(c)?));
         if parsed.ranked() {
-            return Err(err(StatusCode::BAD_REQUEST, "Exporting every result doesn't work with image search; select them instead"));
+            return Err(err(StatusCode::BAD_REQUEST, ranked_msg));
         }
         let (wh, params) = search::build_sql(&parsed, false);
         let mut stmt = c.prepare(&format!("SELECT a.id FROM assets a WHERE {wh} ORDER BY {}", search::order_by("name")))?;
