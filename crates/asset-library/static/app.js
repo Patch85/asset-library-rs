@@ -146,7 +146,7 @@ function listHtml(key, entries, noun) {
       title="${esc(e.title || "")}"><span class="label">${esc(e.label)}</span>${e.n == null ? "" : `<span class="n">${e.n.toLocaleString()}</span>`}</li>`;
   let more = "";
   if (!f && rest.length > shown.length) more = `<li class="more" data-more="${esc(key)}">Show all ${rest.length.toLocaleString()}</li>`;
-  else if (!f && all && rest.length > CAP) more = `<li class="more" data-more="${esc(key)}">Show fewer</li>`;
+  else if (!f && state.expanded.has(key) && rest.length > cap + 2) more = `<li class="more" data-more="${esc(key)}">Show fewer</li>`;
   else if (f && !rest.length) more = `<li class="muted">No ${noun} match</li>`;
   const box = avail.length > FILTER_AT || f
     ? `<input type="search" class="list-filter" data-find="${esc(key)}" value="${esc(state.find[key] || "")}"
