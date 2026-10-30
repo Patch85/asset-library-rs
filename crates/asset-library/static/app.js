@@ -1117,6 +1117,16 @@ function bindPageZoom() {
   }, { passive: false });
 }
 
+/** The desktop app's webview has a browser right-click menu (Back, Reload, Save image, Edge
+ *  tools that don't work in an app window). Keep it only where it helps: text boxes and selected
+ *  text, for cut/copy/paste. The app's own menus (tags, sources) call preventDefault themselves. */
+function bindContextMenu() {
+  document.addEventListener("contextmenu", (e) => {
+    const editable = e.target.closest("input, textarea, [contenteditable]");
+    if (!editable && !String(window.getSelection())) e.preventDefault();
+  });
+}
+
 // ------------------------------------------------------------------ init
 
 function bindEvents() {
@@ -1257,7 +1267,7 @@ async function init() {
   document.documentElement.style.setProperty("--thumb", `${zoom}px`);
   bindEvents();
   bindPeek();
-  if (state.meta.desktop) bindPageZoom();
+  if (state.meta.desktop) { bindPageZoom(); bindContextMenu(); }
   await refreshSidebar();
   reload();
   const s = await api("/api/scan/status");
