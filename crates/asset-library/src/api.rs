@@ -15,6 +15,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::classifier;
 use crate::config::{ASSET_TYPES, COLOR_HEX};
 use crate::db::{CHUNK, Database, get_or_create_tags, marks, normalize_tag, reindex_fts};
 use crate::desktop::{Desktop, drag_icon};
@@ -56,6 +57,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/suggestions", post(suggestions))
         .route("/api/suggestions/reject", post(reject_suggestion))
         .route("/api/suggestions/ignored", get(ignored_suggestions))
+        .route("/api/review", get(review_list))
+        .route("/api/review/{asset_type}/{tag}", get(review_tag))
         .route("/api/suggestions/ignored/{tag}", axum::routing::delete(unignore_suggestion))
         .route("/api/tags", get(list_tags))
         .route("/api/settings", get(get_settings).patch(update_settings))
@@ -789,11 +792,20 @@ struct RejectIn {
     /// Never suggest this tag again.
     #[serde(default)]
     everywhere: bool,
+    /// Take the rejection back (the review queue's undo).
+    #[serde(default)]
+    undo: bool,
 }
 
 async fn reject_suggestion(State(s): St, Json(body): Json<RejectIn>) -> ApiResult {
     let tag = normalize_tag(&body.tag);
     s.tx(|c| {
+        if body.undo {
+            for id in &body.ids {
+                c.execute("DELETE FROM suggestion_rejects WHERE asset_id = ? AND tag = ?", params![id, tag])?;
+            }
+            return Ok(());
+        }
         if body.everywhere {
             c.execute("INSERT OR IGNORE INTO suggestion_ignore VALUES (?)", params![tag])?;
         }
@@ -803,6 +815,72 @@ async fn reject_suggestion(State(s): St, Json(body): Json<RejectIn>) -> ApiResul
         Ok(())
     })?;
     ok()
+}
+
+// ---------------------------------------------------------------- review queue
+
+/// Learned tags, with how many untagged assets probably have each (as of the last training),
+/// most first. Tags suggested nowhere ("never suggest") are left out.
+async fn review_list(State(s): St) -> ApiResult {
+    let models = s.jobs.analysis.classifiers.current();
+    let ignored: std::collections::HashSet<String> = s.tx(|c| {
+        let mut stmt = c.prepare("SELECT tag FROM suggestion_ignore")?;
+        let tags = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(tags)
+    })?;
+    let mut out: Vec<Value> = models
+        .iter()
+        .flat_map(|(t, m)| m.labels.iter().zip(&m.likely).map(move |(tag, &n)| (t, tag, n)))
+        .filter(|(_, tag, n)| *n > 0 && !ignored.contains(*tag))
+        .map(|(t, tag, n)| json!({ "asset_type": t, "tag": tag, "likely": n }))
+        .collect();
+    out.sort_by(|a, b| b["likely"].as_u64().cmp(&a["likely"].as_u64()).then_with(|| a["tag"].as_str().cmp(&b["tag"].as_str())));
+    Ok(Json(out.into()))
+}
+
+#[derive(Deserialize)]
+struct ReviewParams {
+    #[serde(default = "review_limit")]
+    limit: usize,
+}
+
+fn review_limit() -> usize {
+    100
+}
+
+/// Assets of `asset_type` the classifier thinks may have `tag`, most likely first, leaving out
+/// those already tagged or rejected. Scores are fresh (the model may be a little older).
+async fn review_tag(State(s): St, Path((asset_type, tag)): Path<(String, String)>, Query(p): Query<ReviewParams>) -> ApiResult {
+    let models = s.jobs.analysis.classifiers.current();
+    let Some(model) = models.get(&asset_type) else { return Ok(Json(json!([]))) };
+    let tag = normalize_tag(&tag);
+    let Some(j) = model.labels.iter().position(|l| *l == tag) else { return Ok(Json(json!([]))) };
+    let (ids, skip) = s.tx(|c| Ok(classifier::candidates(c, &asset_type, std::slice::from_ref(&tag))?))?;
+    let idx = tokio::task::block_in_place(|| s.jobs.analysis.index.get(&s.db))?;
+    let todo: Vec<i64> = ids.into_iter().filter(|id| !skip[0].contains(id)).collect();
+    let mut scored: Vec<(i64, f32)> = tokio::task::block_in_place(|| model.predict_many(&idx, &todo, Some(j)))
+        .into_iter()
+        .map(|(id, p)| (id, p[0]))
+        .filter(|&(_, p)| p >= classifier::REVIEW_MIN)
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.truncate(p.limit.clamp(1, 1000));
+    let items = s.tx(|c| {
+        let mut stmt = c.prepare_cached("SELECT name, rel_path, file_hash, width, height FROM assets WHERE id = ?")?;
+        let mut items = Vec::new();
+        for (id, score) in &scored {
+            let item = stmt.query_row(params![id], |r| {
+                Ok(json!({
+                    "id": id, "name": r.get::<_, String>(0)?, "rel_path": r.get::<_, String>(1)?,
+                    "file_hash": r.get::<_, String>(2)?, "width": r.get::<_, Option<i64>>(3)?,
+                    "height": r.get::<_, Option<i64>>(4)?, "score": similarity::round_to(*score as f64, 2),
+                }))
+            })?;
+            items.push(item);
+        }
+        Ok(items)
+    })?;
+    Ok(Json(items.into()))
 }
 
 async fn ignored_suggestions(State(s): St) -> ApiResult {

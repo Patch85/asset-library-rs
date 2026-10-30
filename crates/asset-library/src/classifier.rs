@@ -4,7 +4,8 @@
 //! standardized CLIP embeddings. On the user's tokens, with whole subfolders held out, it beat
 //! the look-alike vote (top-1 right 48% vs 42%, shown suggestions right 58% vs 35%; see
 //! `tools/eval_tags.py`). Training takes seconds, so models are rebuilt in the background
-//! after edits, and only for asset types whose tags changed.
+//! after edits, and only for asset types whose tags changed. Rejected suggestions count
+//! against the rejected tag (only), so reviewing teaches the model.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -28,9 +29,13 @@ const LEARNING_RATE: f32 = 0.5;
 const L2: f32 = 1e-2;
 /// Suggest a tag when its probability reaches this.
 pub const THRESHOLD: f32 = 0.5;
+/// The review queue goes on below the suggestion threshold, to where the model is unsure.
+pub const REVIEW_MIN: f32 = 0.2;
 
 pub struct Model {
     pub labels: Vec<String>,
+    /// Per label: assets that probably have it but aren't tagged (or rejected), at training time.
+    pub likely: Vec<usize>,
     mean: Array1<f32>,
     scale: Array1<f32>,
     /// (EMBED_DIM + 1) x labels; the last row is the bias.
@@ -45,6 +50,55 @@ impl Model {
         z += &self.weights.row(EMBED_DIM);
         z.iter().map(|&v| sigmoid(v)).collect()
     }
+
+    /// Probabilities for many assets (those without an embedding are skipped), for one label
+    /// or all of them: `(asset id, probabilities)`.
+    pub fn predict_many(&self, idx: &Index, ids: &[i64], label: Option<usize>) -> Vec<(i64, Vec<f32>)> {
+        let w = match label {
+            Some(j) => self.weights.slice(ndarray::s![.., j..j + 1]),
+            None => self.weights.view(),
+        };
+        let have: Vec<(i64, &[f32])> = ids.iter().filter_map(|&id| Some((id, idx.vector_of(id)?))).collect();
+        let mut out = Vec::with_capacity(have.len());
+        for chunk in have.chunks(4096) {
+            let mut x = Array2::<f32>::ones((chunk.len(), EMBED_DIM + 1));
+            for (i, (_, v)) in chunk.iter().enumerate() {
+                let mut row = x.row_mut(i);
+                let mut f = row.slice_mut(ndarray::s![..EMBED_DIM]);
+                f.assign(&ndarray::ArrayView1::from(*v));
+                f -= &self.mean;
+                f /= &self.scale;
+            }
+            let mut z = x.dot(&w);
+            z.mapv_inplace(sigmoid);
+            out.extend(chunk.iter().zip(z.rows()).map(|((id, _), p)| (*id, p.to_vec())));
+        }
+        out
+    }
+}
+
+/// Assets of a type, and per label the ones it can't be suggested for (already tagged, or
+/// rejected). Shared by the review queue and the likely counts.
+pub fn candidates(c: &Connection, asset_type: &str, labels: &[String]) -> rusqlite::Result<(Vec<i64>, Vec<HashSet<i64>>)> {
+    let ids: Vec<i64> = c
+        .prepare("SELECT id FROM assets WHERE asset_type = ? AND missing = 0 ORDER BY id")?
+        .query_map(params![asset_type], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let pos: HashMap<&str, usize> = labels.iter().enumerate().map(|(j, l)| (l.as_str(), j)).collect();
+    let mut skip = vec![HashSet::new(); labels.len()];
+    let mut stmt = c.prepare(
+        "SELECT x.asset_id, t.name FROM asset_tags x JOIN tags t ON t.id = x.tag_id
+         JOIN assets a ON a.id = x.asset_id AND a.asset_type = ?1
+         UNION ALL SELECT r.asset_id, r.tag FROM suggestion_rejects r
+         JOIN assets a ON a.id = r.asset_id AND a.asset_type = ?1",
+    )?;
+    for row in stmt.query_map(params![asset_type], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+        let (id, tag) = row?;
+        if let Some(&j) = pos.get(tag.as_str()) {
+            skip[j].insert(id);
+        }
+    }
+    Ok((ids, skip))
 }
 
 fn sigmoid(z: f32) -> f32 {
@@ -52,7 +106,7 @@ fn sigmoid(z: f32) -> f32 {
 }
 
 /// What a type's model was trained on: retrain only when this changes.
-type Signature = (i64, i64, f64);
+type Signature = (i64, i64, f64, i64, f64);
 
 #[derive(Default)]
 pub struct Models {
@@ -62,6 +116,10 @@ pub struct Models {
 impl Models {
     pub fn get(&self, asset_type: &str) -> Option<&Model> {
         self.by_type.get(asset_type).map(|(_, m)| m.as_ref())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Model)> {
+        self.by_type.iter().map(|(t, (_, m))| (t.as_str(), m.as_ref()))
     }
 }
 
@@ -90,7 +148,16 @@ impl Classifiers {
             if let Some((s, m)) = old.by_type.get(&t).filter(|(s, _)| *s == sig) {
                 next.by_type.insert(t, (*s, Arc::clone(m)));
             } else if let Some(set) = db.tx(|c| load(c, &t, idx))? {
-                next.by_type.insert(t, (sig, Arc::new(fit(set))));
+                let mut model = fit(set);
+                let (ids, skip) = db.tx(|c| candidates(c, &t, &model.labels))?;
+                let mut likely = vec![0; model.labels.len()];
+                for (id, p) in model.predict_many(idx, &ids, None) {
+                    for (j, &pj) in p.iter().enumerate() {
+                        likely[j] += usize::from(pj >= THRESHOLD && !skip[j].contains(&id));
+                    }
+                }
+                model.likely = likely;
+                next.by_type.insert(t, (sig, Arc::new(model)));
             }
         }
         *self.models.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(next);
@@ -105,13 +172,21 @@ fn signature(c: &Connection, asset_type: &str, idx: &Index) -> rusqlite::Result<
         params![asset_type],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    Ok((idx.len() as i64, n, sum))
+    let (rn, rsum): (i64, f64) = c.query_row(
+        "SELECT count(*), total(r.asset_id * 1000003 + length(r.tag) * 7919 + unicode(r.tag)) FROM suggestion_rejects r
+         JOIN assets a ON a.id = r.asset_id AND a.asset_type = ? AND a.missing = 0",
+        params![asset_type],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok((idx.len() as i64, n, sum, rn, rsum))
 }
 
-/// Standardized embeddings (with a bias column), 0/1 targets and their labels.
+/// Standardized embeddings (with a bias column), 0/1 targets, which targets are known, and
+/// the labels.
 pub struct TrainingSet {
     x: Array2<f32>,
     y: Array2<f32>,
+    known: Array2<f32>,
     labels: Vec<String>,
     mean: Array1<f32>,
     scale: Array1<f32>,
@@ -140,6 +215,17 @@ pub fn load(c: &Connection, asset_type: &str, idx: &Index) -> rusqlite::Result<O
             tagged.entry(tag).or_default().push(i);
         }
     }
+    let mut rejected: Vec<(usize, String)> = Vec::new();
+    let mut stmt = c.prepare(
+        "SELECT r.asset_id, r.tag FROM suggestion_rejects r
+         JOIN assets a ON a.id = r.asset_id AND a.asset_type = ? AND a.missing = 0",
+    )?;
+    for row in stmt.query_map(params![asset_type], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+        let (id, tag) = row?;
+        if let Some(&i) = row_of.get(&id) {
+            rejected.push((i, tag));
+        }
+    }
     let folder = |i: usize| all[i].1.rsplit_once('/').map_or("", |(d, _)| d);
     let mut labels: Vec<(String, Vec<usize>)> = tagged
         .into_iter()
@@ -153,14 +239,24 @@ pub fn load(c: &Connection, asset_type: &str, idx: &Index) -> rusqlite::Result<O
     labels.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
     labels.truncate(MAX_LABELS);
 
-    // Training rows: assets with a learned tag, evenly sampled down to MAX_SAMPLES.
+    // Training rows: assets with a learned tag (evenly sampled down to MAX_SAMPLES), whose
+    // every target is known, plus assets rejected for a learned tag, known for that tag only.
     let mut rows: Vec<usize> = labels.iter().flat_map(|(_, r)| r.iter().copied()).collect();
     rows.sort_unstable();
     rows.dedup();
-    if rows.len() > MAX_SAMPLES {
-        let step = rows.len() as f64 / MAX_SAMPLES as f64;
-        rows = (0..MAX_SAMPLES).map(|i| rows[(i as f64 * step) as usize]).collect();
+    let fully_known: HashSet<usize> = rows.iter().copied().collect();
+    let learned: HashSet<String> = labels.iter().map(|(t, _)| t.clone()).collect();
+    rejected.retain(|(i, t)| learned.contains(t) && !fully_known.contains(i));
+    let mut extra: Vec<usize> = rejected.iter().map(|(i, _)| *i).collect();
+    extra.sort_unstable();
+    extra.dedup();
+    let room = MAX_SAMPLES.saturating_sub(extra.len());
+    if rows.len() > room {
+        let step = rows.len() as f64 / room as f64;
+        rows = (0..room).map(|i| rows[(i as f64 * step) as usize]).collect();
     }
+    let sampled_known = rows.len();
+    rows.extend(extra);
     // A tag on every training row can't be told apart from anything.
     labels.retain(|(_, r)| r.len() < rows.len());
     if labels.is_empty() {
@@ -193,13 +289,21 @@ pub fn load(c: &Connection, asset_type: &str, idx: &Index) -> rusqlite::Result<O
             y[[i, j]] = 1.0;
         }
     }
+    let label_pos: HashMap<&str, usize> = labels.iter().enumerate().map(|(j, (t, _))| (t.as_str(), j)).collect();
+    let mut known = Array2::<f32>::zeros((n, labels.len()));
+    known.slice_mut(ndarray::s![..sampled_known, ..]).fill(1.0);
+    for (i, t) in &rejected {
+        if let (Some(&p), Some(&j)) = (pos_of.get(i), label_pos.get(t.as_str())) {
+            known[[p, j]] = 1.0;
+        }
+    }
 
-    Ok(Some(TrainingSet { x, y, labels: labels.into_iter().map(|(t, _)| t).collect(), mean, scale }))
+    Ok(Some(TrainingSet { x, y, known, labels: labels.into_iter().map(|(t, _)| t).collect(), mean, scale }))
 }
 
 /// One-vs-rest logistic regression, every label at once, full-batch gradient descent.
 pub fn fit(set: TrainingSet) -> Model {
-    let TrainingSet { x, y, labels, mean, scale } = set;
+    let TrainingSet { x, y, known, labels, mean, scale } = set;
     let n = x.nrows();
     let mut w = Array2::<f32>::zeros((EMBED_DIM + 1, labels.len()));
     let xt = x.t();
@@ -207,12 +311,13 @@ pub fn fit(set: TrainingSet) -> Model {
         let mut g = x.dot(&w);
         g.mapv_inplace(sigmoid);
         g -= &y;
+        g *= &known; // unknown targets don't pull either way
         let mut grad = xt.dot(&g);
         grad /= n as f32;
         grad.scaled_add(L2, &w);
         w.scaled_add(-LEARNING_RATE, &grad);
     }
-    Model { labels, mean, scale, weights: w }
+    Model { likely: vec![0; labels.len()], labels, mean, scale, weights: w }
 }
 
 #[cfg(test)]
@@ -282,6 +387,20 @@ mod tests {
         // Nothing changed: the same model is kept rather than retrained.
         classifiers.retrain(&db, &idx).unwrap();
         assert!(std::ptr::eq(classifiers.current().get("token").unwrap(), m));
+        // The untagged pack looks like dragons and isn't tagged: likely dragons.
+        assert_eq!(m.likely, [30, 0]);
+
+        // Rejecting "dragon" for an untagged one trains on it, for "dragon" only, and retrains.
+        db.tx(|c| c.execute("INSERT INTO suggestion_rejects SELECT id, 'dragon' FROM assets WHERE file_hash = 'new0'", []))
+            .unwrap();
+        let set = db.tx(|c| load(c, "token", &idx)).unwrap().unwrap();
+        assert_eq!(set.x.nrows(), 81);
+        assert_eq!(set.known.row(80).to_vec(), [1.0, 0.0]);
+        assert_eq!(set.known.row(0).to_vec(), [1.0, 1.0]);
+        classifiers.retrain(&db, &idx).unwrap();
+        let retrained = classifiers.current();
+        assert!(!std::ptr::eq(retrained.get("token").unwrap(), m));
+        assert_eq!(retrained.get("token").unwrap().likely, [29, 0]); // the rejected one is out
     }
 
     /// Times training on a copy of a real library:
