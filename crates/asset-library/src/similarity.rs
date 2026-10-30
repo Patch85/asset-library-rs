@@ -13,6 +13,7 @@ use regex::Regex;
 use rusqlite::{Connection, params_from_iter};
 use serde::Serialize;
 
+use crate::classifier::Models;
 use crate::clip::{EMBED_DIM, from_blob};
 use crate::db::{Database, marks};
 
@@ -37,6 +38,15 @@ pub struct Index {
 }
 
 impl Index {
+    /// The embedding of an asset, if it has one.
+    pub(crate) fn vector_of(&self, asset_id: i64) -> Option<&[f32]> {
+        self.pos.get(&asset_id).map(|&n| self.vector(n))
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.ids.len()
+    }
+
     fn vector(&self, n: usize) -> &[f32] {
         &self.vectors[n * EMBED_DIM..(n + 1) * EMBED_DIM]
     }
@@ -183,7 +193,13 @@ fn column(c: &Connection, sql: &str) -> rusqlite::Result<HashSet<String>> {
 }
 
 /// Per asset: suggestions best first. Sources: filename, look-alike, or both.
-pub fn suggest(db: &Database, idx: &Index, asset_ids: &[i64], limit: usize) -> rusqlite::Result<Vec<(i64, Vec<Suggestion>)>> {
+pub fn suggest(
+    db: &Database,
+    idx: &Index,
+    models: &Models,
+    asset_ids: &[i64],
+    limit: usize,
+) -> rusqlite::Result<Vec<(i64, Vec<Suggestion>)>> {
     if asset_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -192,12 +208,15 @@ pub fn suggest(db: &Database, idx: &Index, asset_ids: &[i64], limit: usize) -> r
         let ignore = column(c, "SELECT tag FROM suggestion_ignore")?;
         let info: HashMap<i64, String> =
             query_pairs(c, "SELECT id, rel_path FROM assets WHERE id IN ({marks})", asset_ids)?.into_iter().collect();
+        let types: HashMap<i64, String> =
+            query_pairs(c, "SELECT id, asset_type FROM assets WHERE id IN ({marks})", asset_ids)?.into_iter().collect();
         let mut rejects: HashMap<i64, HashSet<String>> = HashMap::new();
         for (id, tag) in query_pairs(c, "SELECT asset_id, tag FROM suggestion_rejects WHERE asset_id IN ({marks})", asset_ids)? {
             rejects.entry(id).or_default().insert(tag);
         }
-        Ok::<_, rusqlite::Error>((all_tags, ignore, info, rejects))
+        Ok::<_, rusqlite::Error>((all_tags, ignore, (info, types), rejects))
     })?;
+    let (info, types) = info;
 
     // Nearest neighbours for every asset first, so their tags load in one query.
     let neighbours: HashMap<i64, Vec<(usize, f32)>> =
@@ -234,6 +253,23 @@ pub fn suggest(db: &Database, idx: &Index, asset_ids: &[i64], limit: usize) -> r
             }
         }
 
+        // Tags the asset type's classifier knows come from it; the vote covers the rest.
+        let model = types.get(&aid).and_then(|t| models.get(t));
+        if let (Some(m), Some(vec)) = (model, idx.vector_of(aid)) {
+            for (lab, p) in m.labels.iter().zip(m.predict(vec)) {
+                if p < crate::classifier::THRESHOLD {
+                    continue;
+                }
+                let p = p as f64;
+                let s = match found.get(lab) {
+                    Some(f) => Suggestion { tag: lab.clone(), score: (f.score.max(p) + 0.1).min(0.99), source: "filename + image" },
+                    None => Suggestion { tag: lab.clone(), score: p, source: "image" },
+                };
+                found.insert(lab.clone(), s);
+            }
+        }
+        let known: HashSet<&str> = model.map(|m| m.labels.iter().map(String::as_str).collect()).unwrap_or_default();
+
         if let Some(top) = neighbours.get(&aid) {
             let min = top.iter().map(|t| t.1).fold(f32::INFINITY, f32::min);
             // Favour the closest.
@@ -252,6 +288,9 @@ pub fn suggest(db: &Database, idx: &Index, asset_ids: &[i64], limit: usize) -> r
             }
             let total: f64 = weights.iter().sum();
             for (lab, v) in votes {
+                if known.contains(lab.as_str()) {
+                    continue;
+                }
                 let score = v / total;
                 if score < LOOKALIKE_MIN {
                     continue;

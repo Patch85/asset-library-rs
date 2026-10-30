@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::clip::{Clip, IMAGE_MODEL, to_blob};
 use crate::db::Database;
 use crate::similarity::IndexCache;
+use crate::classifier::Classifiers;
 use crate::thumbs::{Thumbs, default_threads};
 
 #[derive(Clone, Default, Serialize)]
@@ -30,6 +31,7 @@ pub struct Analysis {
     thumbs: Arc<Thumbs>,
     pub clip: Clip,
     pub index: IndexCache,
+    pub classifiers: Classifiers,
     status: Mutex<AnalysisStatus>,
     ai: AtomicBool,
     pub batch: AtomicUsize,
@@ -43,6 +45,7 @@ impl Analysis {
             thumbs,
             clip,
             index: IndexCache::default(),
+            classifiers: Classifiers::default(),
             status: Mutex::new(AnalysisStatus { ai_available: ai, ..Default::default() }),
             ai: AtomicBool::new(ai),
             batch: AtomicUsize::new(64),

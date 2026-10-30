@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod api;
 pub mod bench;
+pub mod classifier;
 pub mod clip;
 pub mod config;
 pub mod db;

@@ -14,6 +14,8 @@ use crate::power::{lower_current_thread_priority, on_battery};
 use crate::settings::SettingsStore;
 use crate::thumbs::Thumbs;
 
+const TRAIN_DELAY: Duration = Duration::from_secs(3);
+
 pub struct Jobs {
     db: Arc<Database>,
     pub thumbs: Arc<Thumbs>,
@@ -22,6 +24,9 @@ pub struct Jobs {
     state: Mutex<State>,
     paused: AtomicBool,
     battery: Mutex<Option<(Instant, bool)>>,
+    /// Classifier retraining: wanted since the last run, and whether a trainer thread is up.
+    train_wanted: AtomicBool,
+    training: AtomicBool,
 }
 
 #[derive(Default)]
@@ -40,6 +45,8 @@ impl Jobs {
             state: Mutex::default(),
             paused: AtomicBool::new(false),
             battery: Mutex::default(),
+            train_wanted: AtomicBool::new(false),
+            training: AtomicBool::new(false),
         }
     }
 
@@ -63,7 +70,38 @@ impl Jobs {
         std::thread::spawn(move || this.run());
     }
 
-    fn run(&self) {
+    /// Retrain tag classifiers a few seconds after the last call (edits come in bursts).
+    /// Only asset types whose tags or embeddings changed are retrained.
+    pub fn train_soon(self: &Arc<Self>) {
+        self.train_wanted.store(true, Ordering::Relaxed);
+        if self.training.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let this = Arc::clone(self);
+        std::thread::spawn(move || {
+            if this.settings.get().low_priority {
+                lower_current_thread_priority();
+            }
+            loop {
+                std::thread::sleep(TRAIN_DELAY);
+                if this.train_wanted.swap(false, Ordering::AcqRel) {
+                    this.wait_for_power();
+                    let result = this.analysis.index.get(&this.db).and_then(|idx| this.analysis.classifiers.retrain(&this.db, &idx));
+                    if let Err(e) = result {
+                        eprintln!("training tag classifiers: {e}");
+                    }
+                    continue;
+                }
+                this.training.store(false, Ordering::Release);
+                // A request between the check and the store would otherwise be lost.
+                if !this.train_wanted.load(Ordering::Acquire) || this.training.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+            }
+        });
+    }
+
+    fn run(self: &Arc<Self>) {
         loop {
             let s = self.settings.get();
             if s.low_priority {
@@ -98,6 +136,8 @@ impl Jobs {
             }
             st.active = false;
             self.analysis.status().running = false;
+            drop(st);
+            self.train_soon(); // new embeddings or tags
             return;
         }
     }

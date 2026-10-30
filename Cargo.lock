@@ -179,6 +179,7 @@ dependencies = [
  "fastembed",
  "image",
  "libc",
+ "ndarray",
  "open",
  "ort",
  "rayon",

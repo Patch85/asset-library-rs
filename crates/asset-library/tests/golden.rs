@@ -127,7 +127,8 @@ fn suggestions_match_python() {
     let cache = asset_library::similarity::IndexCache::default();
     let idx = cache.get(&db).unwrap();
     let ids: Vec<i64> = golden_sugg.keys().map(|k| k.parse().unwrap()).collect();
-    let ours = asset_library::similarity::suggest(&db, &idx, &ids, 12).unwrap();
+    // No classifiers: this compares the look-alike vote with the original's.
+    let ours = asset_library::similarity::suggest(&db, &idx, &Default::default(), &ids, 12).unwrap();
     let (mut same_sets, mut score_diff_max) = (0, 0.0f64);
     for (aid, list) in &ours {
         let theirs = golden_sugg[&aid.to_string()].as_array().unwrap();

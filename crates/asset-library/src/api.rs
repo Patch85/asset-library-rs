@@ -71,7 +71,19 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/facets", get(facets))
         .route("/api/counts", get(counts))
         .fallback(get(static_file))
+        .layer(axum::middleware::from_fn_with_state(Arc::clone(&state), retrain_after_edits))
         .with_state(state)
+}
+
+/// After any successful change, retrain the tag classifiers soon (only types whose tags
+/// changed are retrained, so changes that don't touch tags cost a few queries).
+async fn retrain_after_edits(State(s): St, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let edit = req.method() != axum::http::Method::GET && req.uri().path().starts_with("/api/");
+    let res = next.run(req).await;
+    if edit && res.status().is_success() {
+        s.jobs.train_soon();
+    }
+    res
 }
 
 /// The web UI, embedded at build time (from the original's `app/static`).
@@ -748,7 +760,8 @@ async fn suggestions(State(s): St, Json(body): Json<SuggestIn>) -> ApiResult {
     }
     let (tags, fields) = tokio::task::block_in_place(|| -> rusqlite::Result<_> {
         let idx = s.jobs.analysis.index.get(&s.db)?;
-        let tags = similarity::suggest(&s.db, &idx, &ids, 12)?;
+        let models = s.jobs.analysis.classifiers.current();
+        let tags = similarity::suggest(&s.db, &idx, &models, &ids, 12)?;
         let fields = s.db.tx(|c| properties::suggest_fields(c, &idx, &ids))?;
         Ok((tags, fields))
     })?;
