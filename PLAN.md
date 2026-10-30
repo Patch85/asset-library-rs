@@ -160,7 +160,8 @@ Tags come from folder names and are incomplete, so these are lower bounds. Train
 - Filenames carry size (`Giant_Coral_Snake_Large_...`), which filename suggestions already use.
 
 Plan, in order:
-1. "Set on all N results" for properties and tags (today bulk edits cover loaded items only).
+1. Done: "Select all N results" after Ctrl+A; every bulk edit then applies to the whole
+   search (`POST /api/assets/bulk` with `q`), after a confirmation. 7,864 tags in 0.5 s.
 2. Per-tag and per-property-value logistic classifiers on stored embeddings, per asset type,
    retrained in the background after edits, replacing the look-alike vote where a label has
    enough examples (vote stays for rare ones). Rejections count as negatives.

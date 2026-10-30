@@ -10,6 +10,8 @@ const state = {
   tags: [], sources: [], meta: { asset_types: [], sorts: [] },
   fields: [], facets: [],
   counts: null, countsGen: 0, find: {}, expanded: new Set(),
+  allResults: false, // the selection is every result of the search, not just those loaded
+  allSelTags: false, // the selection panel lists every tag, not just the top 12
 };
 
 // ------------------------------------------------------------------ utils
@@ -305,7 +307,7 @@ async function refreshSidebar() {
   [state.tags, state.sources, state.facets] =
     await Promise.all([api("/api/tags"), api("/api/sources"), api("/api/facets")]);
   renderSidebar();
-  loadCounts();
+  await loadCounts();
 }
 
 // ------------------------------------------------------------------ grid
@@ -316,6 +318,8 @@ function reload() {
   state.items = [];
   state.done = false;
   state.selected.clear();
+  state.allResults = false;
+  state.allSelTags = false;
   state.anchor = null;
   $("#grid").innerHTML = "";
   renderSidebar();
@@ -334,10 +338,12 @@ async function loadMore() {
     if (gen !== state.gen) return;
     const start = state.items.length;
     state.items.push(...data.items);
+    if (state.allResults) data.items.forEach((it) => state.selected.add(it.id));
     state.total = data.total;
     state.done = state.items.length >= data.total || data.items.length === 0;
     $("#grid").insertAdjacentHTML("beforeend", data.items.map((it, i) => cardHtml(it, start + i)).join(""));
     renderCounts();
+    if (state.allResults) $("#grid").querySelectorAll(".card:not(.selected)").forEach((el) => el.classList.add("selected"));
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -373,7 +379,11 @@ function renderCounts() {
     ? `Top ${state.total} matches, best first`
     : `${state.total.toLocaleString()} item${state.total === 1 ? "" : "s"}`;
   const n = state.selected.size;
-  $("#sel-count").textContent = n ? `${n} selected` : "";
+  const offer = !ranked && n && n === state.items.length && state.total > n;
+  $("#sel-count").innerHTML = state.allResults
+    ? `All ${state.total.toLocaleString()} results selected`
+    : n ? `${n.toLocaleString()} selected${offer
+      ? ` <button id="select-all-results" class="ghost small">Select all ${state.total.toLocaleString()} results</button>` : ""}` : "";
   $("#export-results").classList.toggle("hidden", ranked || state.total === 0);
   const empty = $("#empty");
   empty.classList.toggle("hidden", state.total > 0 || state.loading);
@@ -383,6 +393,7 @@ function renderCounts() {
 }
 
 function syncSelectionClasses() {
+  if (state.selected.size < state.items.length) state.allResults = false;
   for (const el of $("#grid").children) {
     const it = state.items[+el.dataset.idx];
     el.classList.toggle("selected", state.selected.has(it.id));
@@ -564,24 +575,36 @@ function renderSingle(a) {
 }
 
 function renderMulti(sel) {
+  // Every result: summarise from the sidebar counts (they cover the whole search).
+  const whole = state.allResults && state.counts;
+  const size = whole ? state.total : sel.length;
   const counts = new Map();
-  for (const it of sel) for (const t of it.tags) counts.set(t, (counts.get(t) || 0) + 1);
+  if (whole) Object.entries(state.counts.tags).forEach(([t, n]) => counts.set(t, n));
+  else for (const it of sel) for (const t of it.tags) counts.set(t, (counts.get(t) || 0) + 1);
   const tags = [...counts].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]));
   const allFav = sel.every((it) => it.favorite);
-  const fields = fieldsForTypes([...new Set(sel.map((it) => it.asset_type))]);
+  const fields = fieldsForTypes(whole ? Object.keys(state.counts.types) : [...new Set(sel.map((it) => it.asset_type))]);
   const common = {}, mixed = new Set();
   for (const f of fields) {
+    if (whole) {
+      const vals = Object.entries(state.counts.fields[f.key.toLowerCase()] || {});
+      const set = vals.reduce((a, [, n]) => a + n, 0);
+      if (vals.length === 1 && set === size) common[f.key] = f.kind === "number" ? +vals[0][0] : vals[0][0];
+      else if (set) mixed.add(f.key);
+      continue;
+    }
     const vals = new Set(sel.map((it) => JSON.stringify(it.fields?.[f.key] ?? null)));
     if (vals.size === 1) { const v = JSON.parse([...vals][0]); if (v !== null) common[f.key] = v; }
     else mixed.add(f.key);
   }
 
   $("#detail").innerHTML = `
-    <h2>${sel.length} selected</h2>
+    <h2>${whole ? `All ${size.toLocaleString()} results` : `${sel.length} selected`}</h2>
     <label>Tags on selection <span class="muted">(dashed = only some)</span>
-      <div class="chips">${tags.map(([t, n]) =>
-        `<span class="chip ${n < sel.length ? "partial" : ""}">${esc(t)}<span class="n">${n}</span>
-           <button data-rm="${esc(t)}" title="Remove from all selected">×</button></span>`).join("") || '<span class="muted">none</span>'}</div>
+      <div class="chips">${tags.slice(0, state.allSelTags ? undefined : 12).map(([t, n]) =>
+        `<span class="chip ${n < size ? "partial" : ""}">${esc(t)}<span class="n">${n}</span>
+           <button data-rm="${esc(t)}" title="Remove from all selected">×</button></span>`).join("") || '<span class="muted">none</span>'}
+        ${tags.length > 12 && !state.allSelTags ? `<button id="m-more-tags" class="ghost small">+${tags.length - 12} more</button>` : ""}</div>
       <input id="tag-input" list="tag-datalist" placeholder="Add tags to all (Enter or comma)…">
     </label>
     <div id="suggestions"></div>
@@ -589,19 +612,20 @@ function renderMulti(sel) {
     ${fieldControls(fields, common, { multi: true, mixed })}
     <div class="actions">
       <button id="m-fav">${allFav ? "Unfavorite all" : "★ Favorite all"}</button>
-      <button id="m-export" class="primary">Export ${sel.length}…</button>
+      <button id="m-export" class="primary">Export ${size.toLocaleString()}…</button>
       <button id="m-clear">Clear selection</button>
     </div>`;
 
   $("#m-type").addEventListener("change", (e) => e.target.value && bulk({ asset_type: e.target.value }));
   bindFieldControls($("#detail"), true, (key, value) => bulk({ set_fields: { [key]: value } }));
   $("#m-fav").addEventListener("click", () => bulk({ favorite: !allFav }));
-  $("#m-export").addEventListener("click", openExport);
+  $("#m-export").addEventListener("click", () => openExport(state.allResults));
   $("#m-clear").addEventListener("click", () => { state.selected.clear(); syncSelectionClasses(); });
+  $("#m-more-tags")?.addEventListener("click", () => { state.allSelTags = true; renderMulti(sel); });
   $("#detail").querySelectorAll("[data-rm]").forEach((b) =>
     b.addEventListener("click", () => bulk({ remove_tags: [b.dataset.rm] })));
   bindTagInput(async (names) => { await bulk({ add_tags: names }); $("#tag-input")?.focus(); });
-  renderSuggestions(sel.map((it) => it.id));
+  if (!state.allResults) renderSuggestions(sel.map((it) => it.id));
 }
 
 // ------------------------------------------------------------------ suggestions
@@ -670,10 +694,29 @@ async function openIgnored() {
   dlg.showModal();
 }
 
+/** What a bulk patch does, for the confirmation before editing every result. */
+function describePatch(p) {
+  if (p.add_tags) return `Add ${p.add_tags.map((t) => `"${normTag(t)}"`).join(", ")}`;
+  if (p.remove_tags) return `Remove "${p.remove_tags[0]}"`;
+  if (p.asset_type) return `Set type to ${p.asset_type}`;
+  if (p.favorite !== undefined) return p.favorite ? "Favorite" : "Unfavorite";
+  const [k, v] = Object.entries(p.set_fields || {})[0] || [];
+  const label = state.fields.find((f) => f.key === k)?.label || k;
+  return v === null || v === "" ? `Clear ${label}` : `Set ${label} to ${v}`;
+}
+
 async function bulk(patch, ids = [...state.selected], refresh = true) {
+  const all = state.allResults && ids.length === state.selected.size;
   const target = new Set(ids);
+  if (all) {
+    const n = state.total.toLocaleString();
+    const ok = await ask({ title: `${describePatch(patch)} on all ${n} results?`,
+      message: `This changes every result of the current search, not just the ones on screen.`, ok: `Change ${n}` });
+    if (!ok) return renderDetail();
+  }
   try {
-    await api("/api/assets/bulk", { method: "POST", body: { ids, ...patch } });
+    const r = await api("/api/assets/bulk", { method: "POST", body: all ? { q: state.q, ...patch } : { ids, ...patch } });
+    if (all) toast(`Changed ${r.count.toLocaleString()} assets`);
   } catch (e) { return toast(e.message, true); }
   state.items.forEach((it, idx) => {
     if (!target.has(it.id)) return;
@@ -691,7 +734,8 @@ async function bulk(patch, ids = [...state.selected], refresh = true) {
     rerenderCard(idx);
   });
   if (!refresh) return;
-  refreshSidebar();
+  if (all) await refreshSidebar(); // the panel's summary comes from the sidebar counts
+  else refreshSidebar();
   renderDetail();
 }
 
@@ -1222,6 +1266,11 @@ function bindEvents() {
   $("#source-dialog").addEventListener("close", onSourceDialogClose);
   $("#export-dialog").addEventListener("close", onExportClose);
   $("#export-results").addEventListener("click", () => openExport(true));
+  $("#sel-count").addEventListener("click", (e) => {
+    if (e.target.id !== "select-all-results") return;
+    state.allResults = true;
+    syncSelectionClasses();
+  });
   document.querySelectorAll("dialog .browse").forEach((b) =>
     b.addEventListener("click", () => pickFolderInto(b.previousElementSibling)));
 
